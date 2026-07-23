@@ -1,0 +1,12 @@
+:root { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #0f172a; background: #f4f7fb; }
+* { box-sizing: border-box; } body { margin: 0; }
+.app-shell header { height: 66px; padding: 0 max(24px, calc((100vw - 1180px)/2)); background: rgba(255,255,255,.92); border-bottom: 1px solid #e2e8f0; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:10; backdrop-filter:blur(12px); }
+.brand { font-weight: 750; font-size: 19px; display:flex; gap:10px; align-items:center; color:#1d4ed8; }
+main { max-width:1180px; margin:auto; padding:38px 20px 70px; }
+.hero { padding:12px 0 28px; } .hero h1 { margin-bottom:8px!important; font-size:36px!important; letter-spacing:-1px; } .hero p { color:#64748b; font-size:16px; }
+.panel { height:100%; box-shadow:0 10px 32px rgba(15,23,42,.06); border:1px solid #e2e8f0; } .panel textarea { margin-bottom:18px; resize:none; line-height:1.8; } .panel .ant-input-number, .panel .ant-select { width:100%; } .panel form>.ant-btn { margin-top:18px; }
+.action-stack { width:100%; } .action-stack .ant-space-item, .action-stack button { width:100%; }
+.result { margin-top:20px; box-shadow:0 10px 32px rgba(15,23,42,.05); } .checks { display:flex; flex-wrap:wrap; gap:8px; margin:22px 0; }
+.trace-time { margin-left:12px; color:#94a3b8; font-size:12px; } .agent-summary { margin:4px 0 0!important; padding:14px 16px; background:#f8fafc; border-radius:10px; color:#334155; }
+.question { display:flex; justify-content:space-between; gap:22px; padding:16px 4px; border-top:1px solid #edf2f7; line-height:1.7; } .question>span { flex:1; } .downloads { margin-top:22px; }
+@media(max-width:991px){.panel{margin-bottom:20px}.hero h1{font-size:29px!important}.question{flex-direction:column;gap:8px}}
