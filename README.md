@@ -7,7 +7,7 @@
 ## 核心闭环
 
 ```text
-MM-Math 中文题目与解析
+CMM-Math 中文题目、答案与解析
 → 可信数据批量入库与知识点归一化
 → 教师自然语言要求
 → Qwen3 JSON Schema 解析 + 明示规则兜底
@@ -37,7 +37,8 @@ PaperOrchestratorAgent
 
 ## 已实现
 
-- MM-Math JSON/JSONL 中文数据适配，兼容年级、0-4 难度、知识点、图片和解析字段；
+- CMM-Math JSONL 适配，可筛选初中年级、纯文本题以及带完整解析的记录；
+- MM-Math 适配与字段审计保留为英文多模态数据实验入口；
 - 可信公开数据集批量发布；以后 OCR/教师自有题目仍可走草稿审核流程；
 - `qwen3:14b` 本地自然语言组卷需求解析；
 - 年级和难度显式表达的规则兜底；
@@ -80,20 +81,27 @@ Linux 环境需要提供中文字体路径：
 export MATH_PAPER_FONT_PATH=/path/to/NotoSansCJK-Regular.ttc
 ```
 
-## 导入 MM-Math
+## 导入中文 CMM-Math
 
-调用 `POST /api/v1/datasets/mm-math/import`：
+从官方数据集下载 `all_data.jsonl`，调用
+`POST /api/v1/datasets/cmm-math/import`：
 
 ```json
 {
-  "path": "/absolute/path/to/mm_math.jsonl",
-  "image_root": "/absolute/path/to/images",
-  "limit": 1000,
+  "path": "/absolute/path/to/all_data.jsonl",
+  "levels": ["七年级", "八年级", "九年级"],
+  "text_only": true,
+  "require_analysis": true,
+  "limit": 3000,
   "publish": true
 }
 ```
 
-`publish=true` 仅适用于已经确认来源和字段质量的可信数据。教师后续上传或 OCR 识别的内容不应跳过审核。
+首版建议保持 `text_only=true`，因为当前 PDF 渲染链路尚未支持题目多图。
+`require_analysis=true` 会排除只有答案、没有解析的记录。`publish=true`
+仅适用于已经确认来源和字段质量的可信数据；教师后续上传或 OCR
+识别的内容不应跳过审核。完整审计见
+[数据集审计](docs/dataset-audit.md)。
 
 ## 关键接口
 
@@ -103,7 +111,8 @@ export MATH_PAPER_FONT_PATH=/path/to/NotoSansCJK-Regular.ttc
 - `POST /api/v1/papers/export/teacher`：教师解析卷 PDF；
 - `POST /api/v1/papers/export-latex/student`：学生试卷 `.tex`；
 - `POST /api/v1/papers/export-latex/teacher`：教师解析卷 `.tex`；
-- `POST /api/v1/datasets/mm-math/import`：中文题库导入。
+- `POST /api/v1/datasets/cmm-math/import`：中文 K12 题库筛选导入；
+- `POST /api/v1/datasets/mm-math/import`：英文多模态 MM-Math 实验导入；
 - `POST /api/v1/agents/runs`：执行单 Agent或多 Agent组卷任务；
 - `GET /api/v1/agents/runs/{run_id}`：读取持久化调度轨迹。
 
@@ -129,11 +138,13 @@ uv run ruff check src tests
 cd web && pnpm build
 ```
 
-当前自动化测试：19 项全部通过；前端 TypeScript 检查和生产构建通过。PDF 已使用 Poppler 渲染为图片并检查中文字体、分页、页码和解析布局。
+当前自动化测试：23 项全部通过；前端 TypeScript 检查和生产构建通过。PDF
+已使用 Poppler 渲染为图片并检查中文字体、分页、页码和解析布局。
 
 ## 下一阶段
 
-- 使用真实 MM-Math 全量数据统计字段分布并完善年级映射；
+- 用知识分类 Agent 将 CMM-Math 的粗粒度 `subject` 映射到教材目录知识节点；
+- 对未知难度进行离线标注和抽样复核，未标注前不宣称可精确控难；
 - 题目图片与 LaTeX 公式的高质量 PDF 排版；
 - 增加换题、锁题、题序拖拽和试卷持久化；
 - 建立组卷成功率、知识点覆盖率和难度偏差评测；

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from calculus_agent.config import Settings, get_settings
+from calculus_agent.datasets.cmm_math import import_cmm_math
 from calculus_agent.datasets.mm_math import import_mm_math
 from calculus_agent.datasets.ugmathbench import import_ugmathbench
 from calculus_agent.db import build_session_factory, create_schema
@@ -33,6 +34,7 @@ from calculus_agent.schemas import (
     AgentRunRequest,
     CurriculumImportRequest,
     CurriculumNodeRead,
+    CMMMathImportRequest,
     DatasetImportRequest,
     DatasetImportSummary,
     DraftApproveRequest,
@@ -221,6 +223,26 @@ def import_chinese_dataset(
         session,
         path,
         image_root=image_root,
+        limit=request.limit,
+        publish=request.publish,
+    )
+
+
+@router.post("/datasets/cmm-math/import", response_model=DatasetImportSummary)
+def import_chinese_k12_dataset(
+    request: CMMMathImportRequest, session: Session = Depends(get_session)
+) -> DatasetImportSummary:
+    path = Path(request.path).expanduser().resolve()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Dataset file not found")
+    image_root = Path(request.image_root).expanduser().resolve() if request.image_root else None
+    return import_cmm_math(
+        session,
+        path,
+        levels=tuple(request.levels),
+        image_root=image_root,
+        text_only=request.text_only,
+        require_analysis=request.require_analysis,
         limit=request.limit,
         publish=request.publish,
     )

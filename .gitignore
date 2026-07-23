@@ -7,6 +7,7 @@ __pycache__/
 .env
 output/
 tmp/
+data/external/
 web/node_modules/
 web/dist/
 *.tsbuildinfo

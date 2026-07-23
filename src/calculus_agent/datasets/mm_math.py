@@ -30,7 +30,9 @@ def import_mm_math(
         if not question or not solution:
             skipped += 1
             continue
-        source_item_id = str(record.get("id") or record.get("qid") or index)
+        source_item_id = str(
+            record.get("id") or record.get("qid") or record.get("file_name") or index
+        )
         found = session.scalar(
             select(QuestionDraft).where(
                 QuestionDraft.source_name == SOURCE_NAME,
@@ -41,8 +43,8 @@ def import_mm_math(
         if found:
             existing += 1
             continue
-        knowledge = _list(record.get("knowledge") or record.get("knowledge_points"))
-        image = _text(record, "image", "image_path", "img")
+        knowledge = _knowledge(record.get("knowledge") or record.get("knowledge_points"))
+        image = _text(record, "file_name", "image", "image_path", "img")
         resolved_image = str(image_root / image) if image_root and image else image
         difficulty = _difficulty(
             record.get("difficult", record.get("difficulty")),
@@ -54,7 +56,7 @@ def import_mm_math(
             source_item_id=source_item_id,
             variant=1,
             subject="初中数学",
-            language="zh-CN",
+            language=_language(question),
             grade=_grade(record),
             question_type=_question_type(record, question),
             difficulty=difficulty,
@@ -86,6 +88,8 @@ def _publish_trusted(
     knowledge_names: list[str],
     answer: str | None,
     solution: str,
+    *,
+    source_name: str = SOURCE_NAME,
 ) -> None:
     question = Question(
         draft_id=draft.id,
@@ -94,7 +98,7 @@ def _publish_trusted(
         question_type=draft.question_type,
         difficulty=draft.difficulty,
         final_answer=answer,
-        solution_json={"solution_steps": [solution], "source": SOURCE_NAME},
+        solution_json={"solution_steps": [solution], "source": source_name},
         verification_status="dataset_reference",
         review_status="approved",
     )
@@ -125,7 +129,7 @@ def _publish_trusted(
                 knowledge_node_id=node.id,
                 relation_type="primary_concept" if index == 0 else "secondary_concept",
                 confidence=1.0,
-                evidence_json=[f"{SOURCE_NAME} 标注"],
+                evidence_json=[f"{source_name} 标注"],
             )
         )
 
@@ -157,14 +161,36 @@ def _list(value) -> list[str]:
     return []
 
 
+def _knowledge(value) -> list[str]:
+    if isinstance(value, dict):
+        ordered_keys = sorted(
+            value,
+            key=lambda key: (
+                0 if re.fullmatch(r"level_\d+", str(key)) else 1,
+                str(key),
+            ),
+        )
+        return [str(value[key]).strip() for key in ordered_keys if str(value[key]).strip()]
+    return _list(value)
+
+
 def _difficulty(value, *, four_level_scale: bool = False) -> float | None:
     if value is None or value == "":
         return None
     try:
         number = float(value)
     except (TypeError, ValueError):
-        mapping = {"容易": 0.2, "较易": 0.35, "中等": 0.5, "较难": 0.7, "困难": 0.9}
-        return mapping.get(str(value).strip())
+        mapping = {
+            "easy": 0.25,
+            "medium": 0.5,
+            "hard": 0.85,
+            "容易": 0.2,
+            "较易": 0.35,
+            "中等": 0.5,
+            "较难": 0.7,
+            "困难": 0.9,
+        }
+        return mapping.get(str(value).strip().lower())
     return min(1.0, max(0.0, number / 4 if four_level_scale or number > 1 else number))
 
 
@@ -173,6 +199,16 @@ def _grade(record: dict) -> str | None:
     if value:
         return value
     year = _text(record, "year")
+    mapping = {
+        "seven": "七年级",
+        "eight": "八年级",
+        "nine": "九年级",
+        "7": "七年级",
+        "8": "八年级",
+        "9": "九年级",
+    }
+    if year and year.lower() in mapping:
+        return mapping[year.lower()]
     return year if year and any(char in year for char in "七八九初") else None
 
 
@@ -188,8 +224,37 @@ def _question_type(record: dict, question: str) -> str:
 
 
 def _extract_final_answer(solution: str) -> str | None:
+    boxed = _last_boxed_value(solution)
+    if boxed:
+        return boxed
     matches = re.findall(r"(?:答案|故|所以|因此)[：:]?\s*([^。；\n]+)", solution)
     return matches[-1].strip() if matches else None
+
+
+def _last_boxed_value(text: str) -> str | None:
+    marker = r"\boxed{"
+    start = text.rfind(marker)
+    if start < 0:
+        return None
+    index = start + len(marker)
+    depth = 1
+    result: list[str] = []
+    while index < len(text):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                value = "".join(result).strip()
+                return value or None
+        result.append(char)
+        index += 1
+    return None
+
+
+def _language(text: str) -> str:
+    return "zh-CN" if re.search(r"[\u4e00-\u9fff]", text) else "en-US"
 
 
 def _fingerprint(text: str) -> str:

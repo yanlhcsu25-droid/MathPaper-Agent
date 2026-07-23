@@ -48,6 +48,16 @@ class MMMathImportRequest(BaseModel):
     publish: bool = True
 
 
+class CMMMathImportRequest(BaseModel):
+    path: str
+    levels: list[str] = Field(default_factory=lambda: ["七年级", "八年级", "九年级"])
+    image_root: str | None = None
+    text_only: bool = True
+    require_analysis: bool = True
+    limit: int | None = Field(default=None, ge=1, le=50000)
+    publish: bool = True
+
+
 class DatasetImportSummary(BaseModel):
     created: int
     existing: int

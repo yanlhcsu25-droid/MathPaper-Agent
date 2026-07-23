@@ -47,3 +47,36 @@ def test_import_mm_math_is_idempotent(session, tmp_path):
     )
     assert import_mm_math(session, path).created == 1
     assert import_mm_math(session, path).existing == 1
+
+
+def test_import_official_mm_math_shape(session, tmp_path):
+    path = tmp_path / "MM_Math.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "question": "As shown in the figure, find $x$.",
+                "solution": r"\textbf{Solution:} Therefore $x=\boxed{\frac{1}{2}}$.",
+                "difficult": "hard",
+                "year": "eight",
+                "knowledge": {
+                    "level_1": "Functions",
+                    "level_2": "Linear Function",
+                },
+                "file_name": "123.png",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = import_mm_math(session, path, image_root=tmp_path / "images")
+
+    assert summary.created == 1
+    draft = session.scalar(select(QuestionDraft))
+    assert draft.source_item_id == "123.png"
+    assert draft.grade == "八年级"
+    assert draft.language == "en-US"
+    assert draft.difficulty == 0.85
+    assert draft.keywords_json == ["Functions", "Linear Function"]
+    assert draft.image_path == str(tmp_path / "images" / "123.png")
+    question = session.scalar(select(Question))
+    assert question.final_answer == r"\frac{1}{2}"
