@@ -13,6 +13,17 @@ def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRe
     random.Random(blueprint.seed).shuffle(rows)
     selected: list[tuple[Question, list[str]]] = []
     used: set[str] = set()
+    rows_by_id = {row[0].id: row for row in rows}
+
+    required_ids = list(dict.fromkeys([*blueprint.locked_question_ids, *blueprint.manual_question_ids]))
+    missing_required: list[str] = []
+    for question_id in required_ids:
+        row = rows_by_id.get(question_id)
+        if row is None:
+            missing_required.append(question_id)
+            continue
+        selected.append(row)
+        used.add(question_id)
 
     def take(predicate, count: int) -> None:
         for row in rows:
@@ -29,11 +40,19 @@ def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRe
     take(lambda _: True, blueprint.total_questions)
 
     selected = selected[: blueprint.total_questions]
-    scores = _allocate_scores(len(selected), blueprint.total_score)
+    if blueprint.question_order:
+        order = {question_id: index for index, question_id in enumerate(blueprint.question_order)}
+        original = {row[0].id: index for index, row in enumerate(selected)}
+        selected.sort(key=lambda row: (order.get(row[0].id, len(order)), original[row[0].id]))
+    scores = _allocate_scores(
+        [question.id for question, _ in selected],
+        blueprint.total_score,
+        blueprint.score_overrides,
+    )
     items = [
         _item(question, knowledge, score) for (question, knowledge), score in zip(selected, scores)
     ]
-    checks = _checks(blueprint, items)
+    checks = _checks(blueprint, items, missing_required)
     warnings = [f"未满足约束：{check.name}" for check in checks if not check.satisfied]
     return PaperPreviewRead(
         title=blueprint.title,
@@ -47,6 +66,8 @@ def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRe
 
 def _candidates(session: Session, blueprint: PaperBlueprint):
     statement = select(Question).where(Question.review_status == "approved")
+    if blueprint.excluded_question_ids:
+        statement = statement.where(Question.id.not_in(blueprint.excluded_question_ids))
     if blueprint.grade:
         statement = statement.where(Question.grade == blueprint.grade)
     statement = statement.where(
@@ -70,11 +91,27 @@ def _candidates(session: Session, blueprint: PaperBlueprint):
     return result
 
 
-def _allocate_scores(count: int, total: int) -> list[int]:
-    if count == 0:
+def _allocate_scores(
+    question_ids: list[str],
+    total: int,
+    overrides: dict[str, int],
+) -> list[int]:
+    if not question_ids:
         return []
-    base, remainder = divmod(total, count)
-    return [base + (1 if index < remainder else 0) for index in range(count)]
+    applicable = {question_id: overrides[question_id] for question_id in question_ids if question_id in overrides}
+    flexible = [question_id for question_id in question_ids if question_id not in applicable]
+    remaining = total - sum(applicable.values())
+    if not flexible:
+        return [applicable[question_id] for question_id in question_ids]
+    base, remainder = divmod(remaining, len(flexible))
+    allocated = {
+        question_id: base + (1 if index < remainder else 0)
+        for index, question_id in enumerate(flexible)
+    }
+    return [
+        applicable[question_id] if question_id in applicable else allocated[question_id]
+        for question_id in question_ids
+    ]
 
 
 def _item(question: Question, knowledge: list[str], score: int) -> PaperItemRead:
@@ -91,7 +128,11 @@ def _item(question: Question, knowledge: list[str], score: int) -> PaperItemRead
     )
 
 
-def _checks(blueprint: PaperBlueprint, items: list[PaperItemRead]) -> list[ConstraintCheck]:
+def _checks(
+    blueprint: PaperBlueprint,
+    items: list[PaperItemRead],
+    missing_required: list[str],
+) -> list[ConstraintCheck]:
     type_counts = Counter(item.question_type for item in items)
     knowledge_counts = Counter(name for item in items for name in item.knowledge)
     checks = [
@@ -107,6 +148,13 @@ def _checks(blueprint: PaperBlueprint, items: list[PaperItemRead]) -> list[Const
             actual=sum(item.score for item in items),
             satisfied=len(items) == blueprint.total_questions
             and sum(item.score for item in items) == blueprint.total_score,
+        ),
+        ConstraintCheck(
+            name="指定题目",
+            required=len(set(blueprint.locked_question_ids) | set(blueprint.manual_question_ids)),
+            actual=len(set(blueprint.locked_question_ids) | set(blueprint.manual_question_ids))
+            - len(missing_required),
+            satisfied=not missing_required,
         ),
     ]
     for question_type, required in blueprint.question_type_counts.items():

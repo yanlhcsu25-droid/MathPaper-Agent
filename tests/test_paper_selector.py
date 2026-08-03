@@ -77,3 +77,69 @@ def test_compose_paper_reports_infeasible_requirement(session):
     assert result.feasible is False
     assert "未满足约束：题目总数" in result.warnings
     assert "未满足约束：题型：填空题" in result.warnings
+
+
+def test_compose_paper_keeps_locked_questions_and_excludes_replaced_questions(session):
+    knowledge = KnowledgeNode(
+        node_type="concept", name="一次函数", normalized_name="一次函数", review_status="approved"
+    )
+    session.add(knowledge)
+    session.flush()
+    locked = _question(session, 1, "选择题", knowledge)
+    excluded = _question(session, 2, "选择题", knowledge)
+    replacement = _question(session, 3, "选择题", knowledge)
+    session.flush()
+
+    result = compose_paper(
+        session,
+        PaperBlueprint(
+            grade="八年级",
+            total_questions=2,
+            locked_question_ids=[locked.id],
+            excluded_question_ids=[excluded.id],
+        ),
+    )
+
+    ids = [item.question_id for item in result.items]
+    assert ids[0] == locked.id
+    assert replacement.id in ids
+    assert excluded.id not in ids
+    assert result.feasible is True
+
+
+def test_compose_paper_reports_missing_locked_question(session):
+    result = compose_paper(
+        session,
+        PaperBlueprint(total_questions=1, locked_question_ids=["missing-question"]),
+    )
+
+    assert result.feasible is False
+    assert "未满足约束：指定题目" in result.warnings
+
+
+def test_compose_paper_applies_manual_order_and_score_override(session):
+    knowledge = KnowledgeNode(
+        node_type="concept", name="一次函数", normalized_name="一次函数", review_status="approved"
+    )
+    session.add(knowledge)
+    session.flush()
+    first = _question(session, 1, "选择题", knowledge)
+    second = _question(session, 2, "解答题", knowledge)
+    third = _question(session, 3, "填空题", knowledge)
+    session.flush()
+
+    result = compose_paper(
+        session,
+        PaperBlueprint(
+            grade="八年级",
+            total_questions=3,
+            total_score=100,
+            manual_question_ids=[first.id],
+            question_order=[third.id, first.id, second.id],
+            score_overrides={first.id: 20},
+        ),
+    )
+
+    assert [item.question_id for item in result.items] == [third.id, first.id, second.id]
+    assert [item.score for item in result.items] == [40, 20, 40]
+    assert result.feasible is True

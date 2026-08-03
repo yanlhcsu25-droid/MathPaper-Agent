@@ -20,12 +20,21 @@ from calculus_agent.models import (
     CurriculumNode,
     KnowledgeAlias,
     KnowledgeNode,
+    Question,
+    QuestionKnowledgeLink,
     QuestionDraft,
     ToolCallTrace,
 )
 from calculus_agent.orchestration.service import run_paper_agent
 from calculus_agent.papers.selector import compose_paper
-from calculus_agent.papers.renderer import render_paper_pdf
+from calculus_agent.papers.drafts import (
+    PaperDraftNotFoundError,
+    compare_paper_drafts,
+    get_paper_draft,
+    list_paper_drafts,
+    save_paper_draft,
+)
+from calculus_agent.papers.pdf_export import export_paper_pdf as build_paper_pdf
 from calculus_agent.papers.latex_renderer import render_paper_latex
 from calculus_agent.questions.review import DraftApprovalError, approve_draft
 from calculus_agent.requirements.parser import OllamaRequirementParser
@@ -44,8 +53,12 @@ from calculus_agent.schemas import (
     MMMathImportRequest,
     NaturalLanguagePaperRequest,
     PaperBlueprint,
+    PaperDraftCreate,
+    PaperDraftDiffRead,
+    PaperDraftRead,
     PaperPreviewRead,
     QuestionRead,
+    QuestionOptionRead,
     ToolCallTraceRead,
 )
 from calculus_agent.solver.service import OllamaSolver, ReferenceAnswerSolver
@@ -201,6 +214,46 @@ def search_knowledge(
     ]
 
 
+@router.get("/questions/search", response_model=list[QuestionOptionRead])
+def search_questions(
+    query: str = Query(default="", max_length=200),
+    grade: str | None = None,
+    question_type: str | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+    session: Session = Depends(get_session),
+) -> list[QuestionOptionRead]:
+    statement = select(Question).where(Question.review_status == "approved")
+    if query.strip():
+        statement = statement.where(Question.question_text.contains(query.strip()))
+    if grade:
+        statement = statement.where(Question.grade == grade)
+    if question_type:
+        statement = statement.where(Question.question_type == question_type)
+    questions = session.scalars(statement.order_by(Question.created_at.desc()).limit(limit)).all()
+    results = []
+    for question in questions:
+        knowledge = list(
+            session.scalars(
+                select(KnowledgeNode.name)
+                .join(
+                    QuestionKnowledgeLink,
+                    QuestionKnowledgeLink.knowledge_node_id == KnowledgeNode.id,
+                )
+                .where(QuestionKnowledgeLink.question_id == question.id)
+            ).all()
+        )
+        results.append(
+            QuestionOptionRead(
+                id=question.id,
+                question_text=question.question_text,
+                question_type=question.question_type,
+                difficulty=question.difficulty,
+                knowledge=knowledge,
+            )
+        )
+    return results
+
+
 @router.post("/datasets/ugmathbench/import", response_model=DatasetImportSummary)
 def import_dataset(
     request: DatasetImportRequest, session: Session = Depends(get_session)
@@ -255,11 +308,47 @@ def preview_paper(
     return compose_paper(session, request)
 
 
+@router.post("/papers/drafts", response_model=PaperDraftRead)
+def create_paper_draft(
+    request: PaperDraftCreate, session: Session = Depends(get_session)
+) -> PaperDraftRead:
+    try:
+        return save_paper_draft(session, request.blueprint, parent_id=request.parent_id)
+    except PaperDraftNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Parent paper draft not found") from error
+
+
+@router.get("/papers/drafts", response_model=list[PaperDraftRead])
+def paper_drafts(session: Session = Depends(get_session)) -> list[PaperDraftRead]:
+    return list_paper_drafts(session)
+
+
+@router.get("/papers/drafts/{draft_id}", response_model=PaperDraftRead)
+def paper_draft(draft_id: str, session: Session = Depends(get_session)) -> PaperDraftRead:
+    try:
+        return get_paper_draft(session, draft_id)
+    except PaperDraftNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Paper draft not found") from error
+
+
+@router.get("/papers/drafts/{draft_id}/diff", response_model=PaperDraftDiffRead)
+def paper_draft_diff(
+    draft_id: str,
+    base_id: str | None = None,
+    session: Session = Depends(get_session),
+) -> PaperDraftDiffRead:
+    try:
+        return compare_paper_drafts(session, draft_id, base_id=base_id)
+    except PaperDraftNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
 @router.post("/papers/export/{version}")
 def export_paper(
     version: str,
     request: PaperBlueprint,
     session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     if version not in {"student", "teacher"}:
         raise HTTPException(status_code=404, detail="Unknown paper version")
@@ -268,12 +357,21 @@ def export_paper(
         raise HTTPException(
             status_code=422, detail={"message": "题库无法满足组卷约束", "warnings": paper.warnings}
         )
-    content = render_paper_pdf(paper, teacher_version=version == "teacher")
+    result = build_paper_pdf(
+        paper,
+        teacher_version=version == "teacher",
+        preferred_engine=settings.pdf_engine,
+        timeout_seconds=settings.pdf_compile_timeout_seconds,
+    )
     filename = "teacher-paper.pdf" if version == "teacher" else "student-paper.pdf"
     return Response(
-        content=content,
+        content=result.content,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Paper-Renderer": result.renderer,
+            **({"X-Paper-Renderer-Warning": "fallback"} if result.warning else {}),
+        },
     )
 
 

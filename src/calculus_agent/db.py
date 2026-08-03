@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -23,6 +24,7 @@ def create_schema(database_url: str) -> None:
     Base.metadata.create_all(build_engine(database_url))
 
 
+@contextmanager
 def session_scope(database_url: str) -> Iterator[Session]:
     factory = build_session_factory(database_url)
     with factory.begin() as session:

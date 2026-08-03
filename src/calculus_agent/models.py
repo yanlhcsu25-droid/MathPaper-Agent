@@ -123,6 +123,22 @@ class QuestionKnowledgeLink(Base):
     evidence_json: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class PaperDraft(Base):
+    __tablename__ = "paper_draft"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("paper_draft.id"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), index=True)
+    blueprint_json: Mapped[dict] = mapped_column(JSON)
+    preview_json: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class AgentRun(Base):
     __tablename__ = "agent_run"
 

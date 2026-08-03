@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -126,6 +127,11 @@ class PaperBlueprint(BaseModel):
     difficulty_max: float = Field(default=1.0, ge=0, le=1)
     question_type_counts: dict[str, int] = Field(default_factory=dict)
     knowledge_quotas: list[KnowledgeQuota] = Field(default_factory=list)
+    locked_question_ids: list[str] = Field(default_factory=list)
+    manual_question_ids: list[str] = Field(default_factory=list)
+    excluded_question_ids: list[str] = Field(default_factory=list)
+    question_order: list[str] = Field(default_factory=list)
+    score_overrides: dict[str, int] = Field(default_factory=dict)
     seed: int = 42
 
     @model_validator(mode="after")
@@ -134,6 +140,27 @@ class PaperBlueprint(BaseModel):
             raise ValueError("difficulty_min cannot exceed difficulty_max")
         if sum(self.question_type_counts.values()) > self.total_questions:
             raise ValueError("题型数量之和不能超过题目总数")
+        if len(set(self.locked_question_ids)) != len(self.locked_question_ids):
+            raise ValueError("锁定题目不能重复")
+        if len(self.locked_question_ids) > self.total_questions:
+            raise ValueError("锁定题目数量不能超过题目总数")
+        required_ids = set(self.locked_question_ids) | set(self.manual_question_ids)
+        if len(required_ids) > self.total_questions:
+            raise ValueError("锁定和手动添加的题目数量不能超过题目总数")
+        overlap = required_ids & set(self.excluded_question_ids)
+        if overlap:
+            raise ValueError("指定题目不能同时被排除")
+        if any(score < 1 or score > self.total_score for score in self.score_overrides.values()):
+            raise ValueError("单题分值必须介于1和试卷总分之间")
+        if sum(self.score_overrides.values()) > self.total_score:
+            raise ValueError("指定题目的分值之和不能超过试卷总分")
+        if len(self.score_overrides) > self.total_questions:
+            raise ValueError("分值调整题目数量不能超过题目总数")
+        minimum_total = sum(self.score_overrides.values()) + (
+            self.total_questions - len(self.score_overrides)
+        )
+        if minimum_total > self.total_score:
+            raise ValueError("剩余总分不足以为其他题目分配至少1分")
         return self
 
 
@@ -152,6 +179,14 @@ class PaperItemRead(BaseModel):
     solution_steps: list[str] = Field(default_factory=list)
 
 
+class QuestionOptionRead(BaseModel):
+    id: str
+    question_text: str
+    question_type: str
+    difficulty: float | None
+    knowledge: list[str] = Field(default_factory=list)
+
+
 class ConstraintCheck(BaseModel):
     name: str
     required: int | str
@@ -166,6 +201,39 @@ class PaperPreviewRead(BaseModel):
     constraints: list[ConstraintCheck]
     warnings: list[str] = Field(default_factory=list)
     feasible: bool
+
+
+class PaperDraftCreate(BaseModel):
+    blueprint: PaperBlueprint
+    parent_id: str | None = None
+
+
+class PaperDraftRead(BaseModel):
+    id: str
+    parent_id: str | None
+    title: str
+    blueprint: PaperBlueprint
+    preview: PaperPreviewRead
+    status: str
+    created_at: datetime
+
+
+class PaperItemChange(BaseModel):
+    question_id: str
+    question_text: str
+    before: int | None = None
+    after: int | None = None
+
+
+class PaperDraftDiffRead(BaseModel):
+    base_draft_id: str
+    target_draft_id: str
+    added: list[PaperItemChange] = Field(default_factory=list)
+    removed: list[PaperItemChange] = Field(default_factory=list)
+    order_changes: list[PaperItemChange] = Field(default_factory=list)
+    score_changes: list[PaperItemChange] = Field(default_factory=list)
+    blueprint_changes: dict[str, dict[str, int | str | None]] = Field(default_factory=dict)
+    has_changes: bool
 
 
 class AgentRunRequest(BaseModel):

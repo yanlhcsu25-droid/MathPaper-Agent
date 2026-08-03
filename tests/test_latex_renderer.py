@@ -30,6 +30,8 @@ def test_student_latex_escapes_prose_and_preserves_math():
     assert r"$y=\frac{1}{2}x+3$" in result
     assert r"50\%" in result
     assert "参考答案与解析" not in result
+    assert "解答应写出文字说明、证明过程或演算步骤" in result
+    assert r"\Needspace{9.4cm}" in result
 
 
 def test_teacher_latex_contains_solution():

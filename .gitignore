@@ -13,3 +13,4 @@ web/dist/
 *.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+/测试卷.pdf
