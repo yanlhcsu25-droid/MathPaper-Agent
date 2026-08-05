@@ -232,6 +232,8 @@ class ValidationReportRead(BaseModel):
 class SavedPaperRead(BaseModel):
     paper_id: str
     blueprint_id: str
+    root_paper_id: str
+    parent_version_id: str | None
     version: int
     status: Literal["draft", "validating", "passed", "failed"]
     total_score: int
@@ -246,6 +248,7 @@ class NaturalLanguagePaperRequest(BaseModel):
 
 
 class PaperItemRead(BaseModel):
+    item_id: str | None = None
     question_id: str
     question_text: str
     question_type: str
@@ -255,6 +258,19 @@ class PaperItemRead(BaseModel):
     final_answer: str | None = None
     solution_steps: list[str] = Field(default_factory=list)
     has_image: bool = False
+    locked: bool = False
+
+
+class PaperItemUpdate(BaseModel):
+    score: int | None = Field(default=None, ge=1, le=300)
+
+
+class PaperReorderRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class PaperLockRequest(BaseModel):
+    locked: bool
 
 
 class MistakePrepCreate(BaseModel):
@@ -332,39 +348,6 @@ class PaperPreviewRead(BaseModel):
     constraints: list[ConstraintCheck]
     warnings: list[str] = Field(default_factory=list)
     feasible: bool
-
-
-class PaperDraftCreate(BaseModel):
-    blueprint: PaperBlueprint
-    parent_id: str | None = None
-
-
-class PaperDraftRead(BaseModel):
-    id: str
-    parent_id: str | None
-    title: str
-    blueprint: PaperBlueprint
-    preview: PaperPreviewRead
-    status: str
-    created_at: datetime
-
-
-class PaperItemChange(BaseModel):
-    question_id: str
-    question_text: str
-    before: int | None = None
-    after: int | None = None
-
-
-class PaperDraftDiffRead(BaseModel):
-    base_draft_id: str
-    target_draft_id: str
-    added: list[PaperItemChange] = Field(default_factory=list)
-    removed: list[PaperItemChange] = Field(default_factory=list)
-    order_changes: list[PaperItemChange] = Field(default_factory=list)
-    score_changes: list[PaperItemChange] = Field(default_factory=list)
-    blueprint_changes: dict[str, dict[str, int | str | None]] = Field(default_factory=dict)
-    has_changes: bool
 
 
 class AgentRunRequest(BaseModel):

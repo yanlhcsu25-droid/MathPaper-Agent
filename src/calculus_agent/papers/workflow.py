@@ -97,10 +97,9 @@ def create_paper(session: Session, blueprint_id: str) -> SavedPaperRead:
     preview = compose_paper(session, blueprint)
     if not preview.feasible:
         raise InfeasiblePaperError(_constraint_violations(preview.constraints))
-    version = (session.scalar(select(func.count(Paper.id)).where(Paper.blueprint_id == record.id)) or 0) + 1
     paper = Paper(
         blueprint_id=record.id,
-        version=version,
+        version=1,
         status="validating",
         title=blueprint.title,
         total_score=preview.total_score,
@@ -108,6 +107,7 @@ def create_paper(session: Session, blueprint_id: str) -> SavedPaperRead:
     )
     session.add(paper)
     session.flush()
+    paper.root_paper_id = paper.id
     locked = set(blueprint.locked_question_ids)
     for position, item in enumerate(preview.items, 1):
         session.add(PaperItem(
@@ -122,6 +122,106 @@ def create_paper(session: Session, blueprint_id: str) -> SavedPaperRead:
     session.flush()
     report = validate_paper(session, paper.id)
     return _paper_read(session, paper, report)
+
+
+def replace_paper_item(session: Session, paper_id: str, item_id: str) -> SavedPaperRead:
+    source, source_items = _paper_and_records(session, paper_id)
+    target = next((item for item in source_items if item.id == item_id), None)
+    if target is None:
+        raise WorkflowNotFoundError("Paper item not found")
+    record = session.get(PaperBlueprintRecord, source.blueprint_id)
+    blueprint = PaperBlueprint.model_validate(record.blueprint_json)
+    locked_ids = [item.question_id for item in source_items if item.id != item_id]
+    replacement_blueprint = blueprint.model_copy(
+        update={
+            "locked_question_ids": locked_ids,
+            "manual_question_ids": [],
+            "excluded_question_ids": list(
+                dict.fromkeys([*blueprint.excluded_question_ids, target.question_id])
+            ),
+        }
+    )
+    preview = compose_paper(session, replacement_blueprint)
+    if not preview.feasible:
+        raise InfeasiblePaperError(_constraint_violations(preview.constraints))
+    old_question_ids = {item.question_id for item in source_items}
+    replacement = next(
+        (item for item in preview.items if item.question_id not in old_question_ids), None
+    )
+    if replacement is None:
+        raise InfeasiblePaperError(
+            [
+                ConstraintViolationRead(
+                    code="REPLACEMENT_UNAVAILABLE",
+                    field=target.section,
+                    required=1,
+                    actual=0,
+                    question_ids=[target.question_id],
+                    repairable=True,
+                    message="没有可用的替换题目",
+                )
+            ]
+        )
+    paper = _new_version(session, source)
+    for old in source_items:
+        question_id = replacement.question_id if old.id == item_id else old.question_id
+        session.add(
+            PaperItem(
+                paper_id=paper.id,
+                question_id=question_id,
+                section=old.section,
+                position=old.position,
+                score=old.score,
+                locked=False if old.id == item_id else old.locked,
+            )
+        )
+    session.flush()
+    return _finish_version(session, paper)
+
+
+def update_paper_item(
+    session: Session, paper_id: str, item_id: str, *, score: int | None
+) -> SavedPaperRead:
+    source, source_items = _paper_and_records(session, paper_id)
+    if not any(item.id == item_id for item in source_items):
+        raise WorkflowNotFoundError("Paper item not found")
+    paper, cloned = _clone_version(session, source, source_items)
+    target = next(item for old_id, item in cloned if old_id == item_id)
+    if score is not None:
+        target.score = score
+    session.flush()
+    return _finish_version(session, paper)
+
+
+def lock_paper_item(
+    session: Session, paper_id: str, item_id: str, *, locked: bool
+) -> SavedPaperRead:
+    source, source_items = _paper_and_records(session, paper_id)
+    if not any(item.id == item_id for item in source_items):
+        raise WorkflowNotFoundError("Paper item not found")
+    paper, cloned = _clone_version(session, source, source_items)
+    next(item for old_id, item in cloned if old_id == item_id).locked = locked
+    session.flush()
+    return _finish_version(session, paper)
+
+
+def reorder_paper_items(
+    session: Session, paper_id: str, item_ids: list[str]
+) -> SavedPaperRead:
+    source, source_items = _paper_and_records(session, paper_id)
+    existing = {item.id for item in source_items}
+    if len(item_ids) != len(existing) or set(item_ids) != existing:
+        raise BlueprintStateError("item_ids必须包含当前试卷的全部题目且不能重复")
+    paper, cloned = _clone_version(session, source, source_items)
+    by_old_id = dict(cloned)
+    # Use temporary negative positions to avoid the per-paper uniqueness constraint on flush.
+    for index, item_id in enumerate(item_ids, 1):
+        by_old_id[item_id].position = -index
+    session.flush()
+    for index, item_id in enumerate(item_ids, 1):
+        by_old_id[item_id].position = index
+    session.flush()
+    return _finish_version(session, paper)
 
 
 def get_paper(session: Session, paper_id: str) -> SavedPaperRead:
@@ -218,11 +318,13 @@ def _items(session: Session, paper_id: str) -> list[PaperItemRead]:
         knowledge = list(session.scalars(select(KnowledgeNode.name).join(QuestionKnowledgeLink, QuestionKnowledgeLink.knowledge_node_id == KnowledgeNode.id).where(QuestionKnowledgeLink.question_id == question.id)).all())
         draft = session.get(QuestionDraft, question.draft_id)
         result.append(PaperItemRead(
+            item_id=item.id,
             question_id=question.id, question_text=question.question_text,
             question_type=item.section, difficulty=question.difficulty, score=item.score,
             knowledge=knowledge, final_answer=question.final_answer,
             solution_steps=(question.solution_json or {}).get("solution_steps", []),
             has_image=bool(draft and draft.image_path),
+            locked=item.locked,
         ))
     return result
 
@@ -249,4 +351,61 @@ def _report_read(session: Session, report: ValidationReport) -> ValidationReport
 
 
 def _paper_read(session: Session, paper: Paper, report: ValidationReportRead) -> SavedPaperRead:
-    return SavedPaperRead(paper_id=paper.id, blueprint_id=paper.blueprint_id, version=paper.version, status=paper.status, total_score=paper.total_score, validation_status=paper.validation_status, preview=load_paper_preview(session, paper.id), validation_report=report, created_at=paper.created_at)
+    return SavedPaperRead(paper_id=paper.id, blueprint_id=paper.blueprint_id, root_paper_id=paper.root_paper_id or paper.id, parent_version_id=paper.parent_version_id, version=paper.version, status=paper.status, total_score=paper.total_score, validation_status=paper.validation_status, preview=load_paper_preview(session, paper.id), validation_report=report, created_at=paper.created_at)
+
+
+def _paper_and_records(session: Session, paper_id: str) -> tuple[Paper, list[PaperItem]]:
+    paper = session.get(Paper, paper_id)
+    if paper is None:
+        raise WorkflowNotFoundError("Paper not found")
+    items = list(
+        session.scalars(
+            select(PaperItem).where(PaperItem.paper_id == paper.id).order_by(PaperItem.position)
+        ).all()
+    )
+    return paper, items
+
+
+def _new_version(session: Session, source: Paper) -> Paper:
+    root_id = source.root_paper_id or source.id
+    version = session.scalar(
+        select(func.max(Paper.version)).where(Paper.root_paper_id == root_id)
+    ) or source.version
+    paper = Paper(
+        blueprint_id=source.blueprint_id,
+        root_paper_id=root_id,
+        parent_version_id=source.id,
+        version=version + 1,
+        status="validating",
+        title=source.title,
+        total_score=source.total_score,
+        validation_status="pending",
+    )
+    session.add(paper)
+    session.flush()
+    return paper
+
+
+def _clone_version(
+    session: Session, source: Paper, items: list[PaperItem]
+) -> tuple[Paper, list[tuple[str, PaperItem]]]:
+    paper = _new_version(session, source)
+    cloned = []
+    for item in items:
+        copy = PaperItem(
+            paper_id=paper.id,
+            question_id=item.question_id,
+            section=item.section,
+            position=item.position,
+            score=item.score,
+            locked=item.locked,
+        )
+        session.add(copy)
+        cloned.append((item.id, copy))
+    session.flush()
+    return paper, cloned
+
+
+def _finish_version(session: Session, paper: Paper) -> SavedPaperRead:
+    report = validate_paper(session, paper.id)
+    return _paper_read(session, paper, report)

@@ -15,7 +15,9 @@ class OllamaRequirementParser:
         prompt = (
             "你是初中数学组卷需求解析器。把教师要求转换为严格JSON，不要选择题目。"
             "字段：title, grade, total_questions, total_score, difficulty_min, "
-            "difficulty_max, question_type_counts, knowledge_quotas, seed。"
+            "difficulty_max, sections, knowledge_quotas, seed。"
+            "sections必须为{question_type,count,score_per_question,total_score}数组，"
+            "且每部分total_score=count*score_per_question，所有部分题数与分值分别等于全卷题数与总分。"
             "另有image_question_count表示至少需要的带图片题数量，strict_knowledge表示是否禁止用无关知识点补题。"
             "difficulty使用0到1；容易约0.2，中等约0.5，困难约0.8。"
             "knowledge_quotas是{name,count}数组。未提及年级时grade为null，未提及总分时为100，"
@@ -56,7 +58,9 @@ class BailianRequirementParser:
         prompt = (
             "你是初中数学组卷需求解析器。把教师要求转换为严格JSON，不要选择题目。"
             "字段：title, grade, total_questions, total_score, difficulty_min, "
-            "difficulty_max, question_type_counts, knowledge_quotas, seed。"
+            "difficulty_max, sections, knowledge_quotas, seed。"
+            "sections必须为{question_type,count,score_per_question,total_score}数组，"
+            "且每部分total_score=count*score_per_question，所有部分题数与分值分别等于全卷题数与总分。"
             "另有image_question_count表示至少需要的带图片题数量，strict_knowledge表示是否禁止用无关知识点补题。"
             "difficulty使用0到1；容易约0.2，中等约0.5，困难约0.8。"
             "knowledge_quotas是{name,count}数组。未提及年级时grade为null，未提及总分时为100，"
@@ -138,4 +142,38 @@ def apply_explicit_constraints(requirement: str, blueprint: PaperBlueprint) -> P
         updates["image_question_count"] = int(image_count.group(1))
     elif re.search(r"(?:需要|要求|必须).*图片|含图片", requirement):
         updates["image_question_count"] = 1
+    sections = []
+    for question_type in ("选择题", "多选题", "填空题", "解答题"):
+        per_item = re.search(
+            rf"{question_type}\s*(\d+)\s*(?:道|题)[^；;。]*?每(?:小)?题\s*(\d+)\s*分",
+            requirement,
+        )
+        total = re.search(
+            rf"{question_type}\s*(\d+)\s*(?:道|题)[^；;。]*?(?:共|合计)\s*(\d+)\s*分",
+            requirement,
+        )
+        if per_item:
+            count, score = map(int, per_item.groups())
+        elif total:
+            count, section_total = map(int, total.groups())
+            if count == 0 or section_total % count:
+                continue
+            score = section_total // count
+        else:
+            continue
+        sections.append(
+            {
+                "question_type": question_type,
+                "count": count,
+                "score_per_question": score,
+                "total_score": count * score,
+            }
+        )
+    if sections:
+        updates["sections"] = sections
+        updates["question_type_counts"] = {
+            section["question_type"]: section["count"] for section in sections
+        }
+        updates["total_questions"] = sum(section["count"] for section in sections)
+        updates["total_score"] = sum(section["total_score"] for section in sections)
     return PaperBlueprint.model_validate({**blueprint.model_dump(), **updates})

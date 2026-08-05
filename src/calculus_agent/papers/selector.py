@@ -1,7 +1,7 @@
 import hashlib
-from itertools import combinations
-from collections import Counter
+from collections import Counter, defaultdict
 
+from ortools.sat.python import cp_model
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -58,21 +58,26 @@ def _candidates(session: Session, blueprint: PaperBlueprint):
         Question.difficulty.between(blueprint.difficulty_min, blueprint.difficulty_max),
     )
     questions = list(session.scalars(statement).all())
-    result = []
-    for question in questions:
-        names = list(
-            session.scalars(
-                select(KnowledgeNode.name)
-                .join(
-                    QuestionKnowledgeLink,
-                    QuestionKnowledgeLink.knowledge_node_id == KnowledgeNode.id,
-                )
-                .where(QuestionKnowledgeLink.question_id == question.id)
-            ).all()
-        )
-        draft = session.get(QuestionDraft, question.draft_id)
-        result.append((question, names, bool(draft and draft.image_path)))
-    return result
+    if not questions:
+        return []
+    question_ids = [question.id for question in questions]
+    knowledge_by_question: dict[str, list[str]] = defaultdict(list)
+    for question_id, name in session.execute(
+        select(QuestionKnowledgeLink.question_id, KnowledgeNode.name)
+        .join(KnowledgeNode, QuestionKnowledgeLink.knowledge_node_id == KnowledgeNode.id)
+        .where(QuestionKnowledgeLink.question_id.in_(question_ids))
+    ):
+        knowledge_by_question[question_id].append(name)
+    draft_ids = [question.draft_id for question in questions]
+    image_by_draft = dict(
+        session.execute(
+            select(QuestionDraft.id, QuestionDraft.image_path).where(QuestionDraft.id.in_(draft_ids))
+        ).all()
+    )
+    return [
+        (question, knowledge_by_question[question.id], bool(image_by_draft.get(question.draft_id)))
+        for question in questions
+    ]
 
 
 def _seed_key(seed: int, question_id: str) -> str:
@@ -85,48 +90,56 @@ def _search(rows, required, blueprint: PaperBlueprint):
         _knowledge_allowed(row, blueprint) for row in required
     ):
         return None
-    remaining = [row for row in rows if row[0].id not in required_ids and _knowledge_allowed(row, blueprint)]
-    needed = blueprint.total_questions - len(required)
-    # Exact type equations make shortages fail before search and greatly reduce the search space.
-    type_required = dict(blueprint.question_type_counts)
-    if type_required:
-        actual = Counter(row[0].question_type for row in required)
-        for question_type, count in type_required.items():
-            if actual[question_type] > count:
-                return None
-        if any(row[0].question_type not in type_required for row in required):
+    eligible = [row for row in rows if _knowledge_allowed(row, blueprint)]
+    model = cp_model.CpModel()
+    selected = [model.new_bool_var(f"q_{index}") for index in range(len(eligible))]
+    by_id = {row[0].id: selected[index] for index, row in enumerate(eligible)}
+    model.add(sum(selected) == blueprint.total_questions)
+    for question_id in required_ids:
+        variable = by_id.get(question_id)
+        if variable is None:
             return None
-        pools = []
-        for question_type, count in type_required.items():
-            amount = count - actual[question_type]
-            pool = [row for row in remaining if row[0].question_type == question_type]
-            if len(pool) < amount:
-                return None
-            pools.append(list(combinations(pool, amount)))
-        def visit(index, chosen):
-            if index == len(pools):
-                candidate = [*required, *chosen]
-                return candidate if _hard_requirements(candidate, blueprint) else None
-            for group in pools[index]:
-                result = visit(index + 1, [*chosen, *group])
-                if result is not None:
-                    return result
-            return None
-        return visit(0, [])
-    for group in combinations(remaining, needed):
-        candidate = [*required, *group]
-        if _hard_requirements(candidate, blueprint):
-            return candidate
-    return None
-
-
-def _hard_requirements(rows, blueprint: PaperBlueprint) -> bool:
-    knowledge = Counter(name for row in rows for name in row[1])
-    return (
-        len(rows) == blueprint.total_questions
-        and sum(row[2] for row in rows) >= blueprint.image_question_count
-        and all(knowledge[quota.name] >= quota.count for quota in blueprint.knowledge_quotas)
+        model.add(variable == 1)
+    for question_type, count in blueprint.question_type_counts.items():
+        model.add(
+            sum(variable for variable, row in zip(selected, eligible) if row[0].question_type == question_type)
+            == count
+        )
+    if blueprint.question_type_counts:
+        allowed_types = set(blueprint.question_type_counts)
+        for variable, row in zip(selected, eligible):
+            if row[0].question_type not in allowed_types:
+                model.add(variable == 0)
+    for quota in blueprint.knowledge_quotas:
+        model.add(
+            sum(variable for variable, row in zip(selected, eligible) if quota.name in row[1])
+            >= quota.count
+        )
+    model.add(
+        sum(variable for variable, row in zip(selected, eligible) if row[2])
+        >= blueprint.image_question_count
     )
+    # Candidate variables are created in stable seeded order; single-worker CP-SAT is reproducible.
+    solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = blueprint.seed
+    status = solver.solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+    chosen = [row for variable, row in zip(selected, eligible) if solver.value(variable)]
+    required_order = {question_id: index for index, question_id in enumerate(required_ids)}
+    type_order = {
+        question_type: index for index, question_type in enumerate(blueprint.question_type_counts)
+    }
+    seeded_order = {row[0].id: index for index, row in enumerate(eligible)}
+    chosen.sort(
+        key=lambda row: (
+            0 if row[0].id in required_order else 1,
+            required_order.get(row[0].id, type_order.get(row[0].question_type, len(type_order))),
+            seeded_order[row[0].id],
+        )
+    )
+    return chosen
 
 
 def _section_scores(selected, blueprint: PaperBlueprint) -> list[int]:

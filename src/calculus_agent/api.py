@@ -10,7 +10,7 @@ from calculus_agent.config import Settings, get_settings
 from calculus_agent.datasets.cmm_math import import_cmm_math
 from calculus_agent.datasets.mm_math import import_mm_math
 from calculus_agent.datasets.ugmathbench import import_ugmathbench
-from calculus_agent.db import build_session_factory, create_schema
+from calculus_agent.db import build_session_factory
 from calculus_agent.knowledge.curriculum import import_curriculum
 from calculus_agent.knowledge.normalization import normalize_name
 from calculus_agent.knowledge.retrieval import retrieve_knowledge
@@ -26,13 +26,6 @@ from calculus_agent.models import (
     ToolCallTrace,
 )
 from calculus_agent.orchestration.service import run_paper_agent
-from calculus_agent.papers.drafts import (
-    PaperDraftNotFoundError,
-    compare_paper_drafts,
-    get_paper_draft,
-    list_paper_drafts,
-    save_paper_draft,
-)
 from calculus_agent.papers.pdf_export import export_paper_pdf as build_paper_pdf
 from calculus_agent.prep.mistakes import create_mistake_prep, get_mistake_prep
 from calculus_agent.prep.vision import BailianVisionExtractor as SiliconFlowVisionExtractor
@@ -46,7 +39,11 @@ from calculus_agent.papers.workflow import (
     get_blueprint as get_saved_blueprint,
     get_paper as get_saved_paper,
     load_paper_preview,
+    lock_paper_item,
+    reorder_paper_items,
+    replace_paper_item,
     save_blueprint,
+    update_paper_item,
     update_blueprint,
     validate_paper as validate_saved_paper,
 )
@@ -71,9 +68,9 @@ from calculus_agent.schemas import (
     NaturalLanguagePaperRequest,
     PaperBlueprint,
     PaperCreateRequest,
-    PaperDraftCreate,
-    PaperDraftDiffRead,
-    PaperDraftRead,
+    PaperItemUpdate,
+    PaperLockRequest,
+    PaperReorderRequest,
     QuestionRead,
     VisionQuestionExtractRead,
     VisionQuestionExtractRequest,
@@ -89,7 +86,6 @@ router = APIRouter(prefix="/api/v1")
 
 
 def get_session(settings: Settings = Depends(get_settings)) -> Iterator[Session]:
-    create_schema(settings.database_url)
     factory = build_session_factory(settings.database_url)
     with factory.begin() as session:
         yield session
@@ -372,41 +368,6 @@ def import_chinese_k12_dataset(
     )
 
 
-@router.post("/papers/drafts", response_model=PaperDraftRead)
-def create_paper_draft(
-    request: PaperDraftCreate, session: Session = Depends(get_session)
-) -> PaperDraftRead:
-    try:
-        return save_paper_draft(session, request.blueprint, parent_id=request.parent_id)
-    except PaperDraftNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Parent paper draft not found") from error
-
-
-@router.get("/papers/drafts", response_model=list[PaperDraftRead])
-def paper_drafts(session: Session = Depends(get_session)) -> list[PaperDraftRead]:
-    return list_paper_drafts(session)
-
-
-@router.get("/papers/drafts/{draft_id}", response_model=PaperDraftRead)
-def paper_draft(draft_id: str, session: Session = Depends(get_session)) -> PaperDraftRead:
-    try:
-        return get_paper_draft(session, draft_id)
-    except PaperDraftNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Paper draft not found") from error
-
-
-@router.get("/papers/drafts/{draft_id}/diff", response_model=PaperDraftDiffRead)
-def paper_draft_diff(
-    draft_id: str,
-    base_id: str | None = None,
-    session: Session = Depends(get_session),
-) -> PaperDraftDiffRead:
-    try:
-        return compare_paper_drafts(session, draft_id, base_id=base_id)
-    except PaperDraftNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-
 @router.post("/blueprints/parse", response_model=BlueprintCreateRead)
 def parse_blueprint(
     request: NaturalLanguagePaperRequest,
@@ -494,6 +455,58 @@ def validate_paper_record(
 ) -> ValidationReportRead:
     try:
         return validate_saved_paper(session, paper_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/papers/{paper_id}/items/{item_id}/replace", response_model=SavedPaperRead)
+def replace_saved_paper_item(
+    paper_id: str, item_id: str, session: Session = Depends(get_session)
+) -> SavedPaperRead:
+    try:
+        return replace_paper_item(session, paper_id, item_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except InfeasiblePaperError as error:
+        raise HTTPException(status_code=422, detail={"message": str(error), "violations": [item.model_dump(mode="json") for item in error.violations]}) from error
+
+
+@router.patch("/papers/{paper_id}/items/{item_id}", response_model=SavedPaperRead)
+def patch_saved_paper_item(
+    paper_id: str,
+    item_id: str,
+    request: PaperItemUpdate,
+    session: Session = Depends(get_session),
+) -> SavedPaperRead:
+    try:
+        return update_paper_item(session, paper_id, item_id, score=request.score)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/papers/{paper_id}/items/reorder", response_model=SavedPaperRead)
+def reorder_saved_paper_items(
+    paper_id: str,
+    request: PaperReorderRequest,
+    session: Session = Depends(get_session),
+) -> SavedPaperRead:
+    try:
+        return reorder_paper_items(session, paper_id, request.item_ids)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except BlueprintStateError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/papers/{paper_id}/items/{item_id}/lock", response_model=SavedPaperRead)
+def lock_saved_paper_item(
+    paper_id: str,
+    item_id: str,
+    request: PaperLockRequest,
+    session: Session = Depends(get_session),
+) -> SavedPaperRead:
+    try:
+        return lock_paper_item(session, paper_id, item_id, locked=request.locked)
     except WorkflowNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 

@@ -3,9 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from calculus_agent.api import router
 from calculus_agent.config import get_settings
+from calculus_agent.db import create_schema
 
 
-app = FastAPI(title=get_settings().app_name, version="0.1.0")
+settings = get_settings()
+create_schema(settings.database_url)
+app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

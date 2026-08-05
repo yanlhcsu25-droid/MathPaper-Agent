@@ -9,7 +9,11 @@ from calculus_agent.papers.workflow import (
     create_paper,
     get_paper,
     load_paper_preview,
+    lock_paper_item,
+    reorder_paper_items,
+    replace_paper_item,
     save_blueprint,
+    update_paper_item,
 )
 from calculus_agent.schemas import PaperBlueprint, SectionRequirement
 
@@ -110,3 +114,33 @@ def test_same_seed_produces_same_order(session):
     paper_a = create_paper(session, first.blueprint_id)
     paper_b = create_paper(session, second.blueprint_id)
     assert [x.question_id for x in paper_a.preview.items] == [x.question_id for x in paper_b.preview.items]
+
+
+def test_paper_edits_create_persistent_versions(session):
+    for number in range(1, 5):
+        _question(session, number, "选择题" if number <= 3 else "解答题")
+    saved = save_blueprint(session, _blueprint())
+    confirm_blueprint(session, saved.blueprint_id)
+    original = create_paper(session, saved.blueprint_id)
+    original_ids = [item.question_id for item in original.preview.items]
+
+    replaced = replace_paper_item(session, original.paper_id, original.preview.items[0].item_id)
+    assert replaced.paper_id != original.paper_id
+    assert replaced.version == 2
+    assert replaced.parent_version_id == original.paper_id
+    assert [item.question_id for item in get_paper(session, original.paper_id).preview.items] == original_ids
+    assert [item.question_id for item in replaced.preview.items] != original_ids
+
+    locked = lock_paper_item(session, replaced.paper_id, replaced.preview.items[0].item_id, locked=True)
+    assert locked.version == 3
+    assert locked.preview.items[0].locked is True
+
+    reversed_ids = [item.item_id for item in reversed(locked.preview.items)]
+    reordered = reorder_paper_items(session, locked.paper_id, reversed_ids)
+    assert reordered.version == 4
+    assert [item.question_id for item in reordered.preview.items] == [item.question_id for item in reversed(locked.preview.items)]
+
+    rescored = update_paper_item(session, reordered.paper_id, reordered.preview.items[0].item_id, score=1)
+    assert rescored.version == 5
+    assert rescored.validation_report.passed is False
+    assert any(item.code == "TOTAL_SCORE_MISMATCH" for item in rescored.validation_report.violations)
