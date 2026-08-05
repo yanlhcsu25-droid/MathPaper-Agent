@@ -118,15 +118,35 @@ class KnowledgeQuota(BaseModel):
     count: int = Field(ge=1, le=100)
 
 
+ALLOWED_QUESTION_TYPES = {"选择题", "多选题", "填空题", "解答题"}
+
+
+class SectionRequirement(BaseModel):
+    question_type: str
+    count: int = Field(ge=0, le=100)
+    score_per_question: int = Field(ge=0, le=300)
+    total_score: int = Field(ge=0, le=300)
+
+    @model_validator(mode="after")
+    def validate_section(self):
+        if self.question_type not in ALLOWED_QUESTION_TYPES:
+            raise ValueError("不支持的题型")
+        if self.count * self.score_per_question != self.total_score:
+            raise ValueError("部分总分必须等于题数乘以每题分值")
+        return self
+
+
 class PaperBlueprint(BaseModel):
     title: str = Field(default="初中数学测试卷", min_length=1, max_length=100)
     grade: str | None = None
     total_questions: int = Field(ge=1, le=100)
     total_score: int = Field(default=100, ge=1, le=300)
+    sections: list[SectionRequirement] = Field(default_factory=list)
     difficulty_min: float = Field(default=0.0, ge=0, le=1)
     difficulty_max: float = Field(default=1.0, ge=0, le=1)
     question_type_counts: dict[str, int] = Field(default_factory=dict)
     knowledge_quotas: list[KnowledgeQuota] = Field(default_factory=list)
+    excluded_topics: list[str] = Field(default_factory=list)
     image_question_count: int = Field(default=0, ge=0, le=100)
     strict_knowledge: bool = False
     locked_question_ids: list[str] = Field(default_factory=list)
@@ -140,8 +160,21 @@ class PaperBlueprint(BaseModel):
     def validate_constraints(self):
         if self.difficulty_min > self.difficulty_max:
             raise ValueError("difficulty_min cannot exceed difficulty_max")
-        if sum(self.question_type_counts.values()) > self.total_questions:
-            raise ValueError("题型数量之和不能超过题目总数")
+        if any(value < 0 for value in self.question_type_counts.values()):
+            raise ValueError("题型数量不得为负数")
+        if any(value not in ALLOWED_QUESTION_TYPES for value in self.question_type_counts):
+            raise ValueError("包含不支持的题型")
+        if self.sections:
+            if sum(item.count for item in self.sections) != self.total_questions:
+                raise ValueError("各部分题目数量之和必须等于题目总数")
+            if sum(item.total_score for item in self.sections) != self.total_score:
+                raise ValueError("各部分总分之和必须等于试卷总分")
+            derived = {item.question_type: item.count for item in self.sections}
+            if len(derived) != len(self.sections):
+                raise ValueError("同一题型只能配置一个部分")
+            self.question_type_counts = derived
+        elif self.question_type_counts and sum(self.question_type_counts.values()) != self.total_questions:
+            raise ValueError("题型数量之和必须等于题目总数")
         if self.image_question_count > self.total_questions:
             raise ValueError("图片题数量不能超过题目总数")
         if len(set(self.locked_question_ids)) != len(self.locked_question_ids):
@@ -166,6 +199,46 @@ class PaperBlueprint(BaseModel):
         if minimum_total > self.total_score:
             raise ValueError("剩余总分不足以为其他题目分配至少1分")
         return self
+
+
+class BlueprintCreateRead(BaseModel):
+    blueprint_id: str
+    status: Literal["draft", "confirmed", "used"]
+    blueprint: PaperBlueprint
+
+
+class PaperCreateRequest(BaseModel):
+    blueprint_id: str
+
+
+class ConstraintViolationRead(BaseModel):
+    code: str
+    field: str
+    required: int | float | str | list | dict | None
+    actual: int | float | str | list | dict | None
+    question_ids: list[str] = Field(default_factory=list)
+    repairable: bool
+    message: str
+
+
+class ValidationReportRead(BaseModel):
+    id: str
+    paper_id: str
+    passed: bool
+    violations: list[ConstraintViolationRead] = Field(default_factory=list)
+    created_at: datetime
+
+
+class SavedPaperRead(BaseModel):
+    paper_id: str
+    blueprint_id: str
+    version: int
+    status: Literal["draft", "validating", "passed", "failed"]
+    total_score: int
+    validation_status: str
+    preview: "PaperPreviewRead"
+    validation_report: ValidationReportRead
+    created_at: datetime
 
 
 class NaturalLanguagePaperRequest(BaseModel):

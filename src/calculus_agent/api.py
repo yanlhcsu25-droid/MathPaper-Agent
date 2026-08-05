@@ -26,7 +26,6 @@ from calculus_agent.models import (
     ToolCallTrace,
 )
 from calculus_agent.orchestration.service import run_paper_agent
-from calculus_agent.papers.selector import compose_paper
 from calculus_agent.papers.drafts import (
     PaperDraftNotFoundError,
     compare_paper_drafts,
@@ -38,11 +37,25 @@ from calculus_agent.papers.pdf_export import export_paper_pdf as build_paper_pdf
 from calculus_agent.prep.mistakes import create_mistake_prep, get_mistake_prep
 from calculus_agent.prep.vision import BailianVisionExtractor as SiliconFlowVisionExtractor
 from calculus_agent.papers.latex_renderer import render_paper_latex
+from calculus_agent.papers.workflow import (
+    BlueprintStateError,
+    InfeasiblePaperError,
+    WorkflowNotFoundError,
+    confirm_blueprint,
+    create_paper as create_saved_paper,
+    get_blueprint as get_saved_blueprint,
+    get_paper as get_saved_paper,
+    load_paper_preview,
+    save_blueprint,
+    update_blueprint,
+    validate_paper as validate_saved_paper,
+)
 from calculus_agent.questions.review import DraftApprovalError, approve_draft
 from calculus_agent.requirements.parser import OllamaRequirementParser
 from calculus_agent.schemas import (
     AgentRunRead,
     AgentRunRequest,
+    BlueprintCreateRead,
     CurriculumImportRequest,
     CurriculumNodeRead,
     CMMMathImportRequest,
@@ -57,15 +70,17 @@ from calculus_agent.schemas import (
     MistakePrepRead,
     NaturalLanguagePaperRequest,
     PaperBlueprint,
+    PaperCreateRequest,
     PaperDraftCreate,
     PaperDraftDiffRead,
     PaperDraftRead,
-    PaperPreviewRead,
     QuestionRead,
     VisionQuestionExtractRead,
     VisionQuestionExtractRequest,
     QuestionOptionRead,
+    SavedPaperRead,
     ToolCallTraceRead,
+    ValidationReportRead,
 )
 from calculus_agent.solver.service import OllamaSolver, ReferenceAnswerSolver
 
@@ -357,13 +372,6 @@ def import_chinese_k12_dataset(
     )
 
 
-@router.post("/papers/preview", response_model=PaperPreviewRead)
-def preview_paper(
-    request: PaperBlueprint, session: Session = Depends(get_session)
-) -> PaperPreviewRead:
-    return compose_paper(session, request)
-
-
 @router.post("/papers/drafts", response_model=PaperDraftRead)
 def create_paper_draft(
     request: PaperDraftCreate, session: Session = Depends(get_session)
@@ -399,75 +407,142 @@ def paper_draft_diff(
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
-@router.post("/papers/export/{version}")
-def export_paper(
-    version: str,
-    request: PaperBlueprint,
-    session: Session = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> Response:
-    if version not in {"student", "teacher"}:
-        raise HTTPException(status_code=404, detail="Unknown paper version")
-    paper = compose_paper(session, request)
-    if not paper.feasible:
-        raise HTTPException(
-            status_code=422, detail={"message": "题库无法满足组卷约束", "warnings": paper.warnings}
-        )
-    result = build_paper_pdf(
-        paper,
-        teacher_version=version == "teacher",
-        preferred_engine=settings.pdf_engine,
-        timeout_seconds=settings.pdf_compile_timeout_seconds,
-    )
-    filename = "teacher-paper.pdf" if version == "teacher" else "student-paper.pdf"
-    return Response(
-        content=result.content,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "X-Paper-Renderer": result.renderer,
-            **({"X-Paper-Renderer-Warning": "fallback"} if result.warning else {}),
-        },
-    )
-
-
-@router.post("/papers/export-latex/{version}")
-def export_paper_latex(
-    version: str,
-    request: PaperBlueprint,
-    session: Session = Depends(get_session),
-) -> Response:
-    if version not in {"student", "teacher"}:
-        raise HTTPException(status_code=404, detail="Unknown paper version")
-    paper = compose_paper(session, request)
-    if not paper.feasible:
-        raise HTTPException(
-            status_code=422,
-            detail={"message": "题库无法满足组卷约束", "warnings": paper.warnings},
-        )
-    content = render_paper_latex(paper, teacher_version=version == "teacher")
-    filename = "teacher-paper.tex" if version == "teacher" else "student-paper.tex"
-    return Response(
-        content=content.encode("utf-8"),
-        media_type="application/x-tex; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.post("/papers/parse-requirement", response_model=PaperBlueprint)
-def parse_paper_requirement(
+@router.post("/blueprints/parse", response_model=BlueprintCreateRead)
+def parse_blueprint(
     request: NaturalLanguagePaperRequest,
+    session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
-) -> PaperBlueprint:
+) -> BlueprintCreateRead:
     parser = OllamaRequirementParser(
         base_url=settings.ollama_base_url,
         model=settings.solver_model,
         timeout=settings.solver_timeout_seconds,
     )
     try:
-        return parser.parse(request.requirement)
+        return save_blueprint(session, parser.parse(request.requirement))
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"需求解析失败：{error}") from error
+
+
+@router.get("/blueprints/{blueprint_id}", response_model=BlueprintCreateRead)
+def read_blueprint(
+    blueprint_id: str, session: Session = Depends(get_session)
+) -> BlueprintCreateRead:
+    try:
+        return get_saved_blueprint(session, blueprint_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.patch("/blueprints/{blueprint_id}", response_model=BlueprintCreateRead)
+def patch_blueprint(
+    blueprint_id: str,
+    blueprint: PaperBlueprint,
+    session: Session = Depends(get_session),
+) -> BlueprintCreateRead:
+    try:
+        return update_blueprint(session, blueprint_id, blueprint)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except BlueprintStateError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/blueprints/{blueprint_id}/confirm", response_model=BlueprintCreateRead)
+def confirm_saved_blueprint(
+    blueprint_id: str, session: Session = Depends(get_session)
+) -> BlueprintCreateRead:
+    try:
+        return confirm_blueprint(session, blueprint_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except BlueprintStateError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/papers", response_model=SavedPaperRead)
+def create_paper_from_blueprint(
+    request: PaperCreateRequest, session: Session = Depends(get_session)
+) -> SavedPaperRead:
+    try:
+        return create_saved_paper(session, request.blueprint_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except BlueprintStateError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InfeasiblePaperError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(error),
+                "violations": [item.model_dump(mode="json") for item in error.violations],
+            },
+        ) from error
+
+
+@router.get("/papers/{paper_id}", response_model=SavedPaperRead)
+def read_paper(paper_id: str, session: Session = Depends(get_session)) -> SavedPaperRead:
+    try:
+        return get_saved_paper(session, paper_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/papers/{paper_id}/validate", response_model=ValidationReportRead)
+def validate_paper_record(
+    paper_id: str, session: Session = Depends(get_session)
+) -> ValidationReportRead:
+    try:
+        return validate_saved_paper(session, paper_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _export_saved_paper(
+    paper_id: str, version: str, extension: str, session: Session, settings: Settings
+) -> Response:
+    if version not in {"student", "teacher"}:
+        raise HTTPException(status_code=404, detail="Unknown paper version")
+    try:
+        preview = load_paper_preview(session, paper_id)
+    except WorkflowNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    teacher = version == "teacher"
+    if extension == "tex":
+        content = render_paper_latex(preview, teacher_version=teacher).encode("utf-8")
+        media_type = "application/x-tex; charset=utf-8"
+        headers = {}
+    else:
+        result = build_paper_pdf(
+            preview,
+            teacher_version=teacher,
+            preferred_engine=settings.pdf_engine,
+            timeout_seconds=settings.pdf_compile_timeout_seconds,
+        )
+        content, media_type = result.content, "application/pdf"
+        headers = {"X-Paper-Renderer": result.renderer}
+    filename = f"{version}-paper.{extension}"
+    return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"', **headers})
+
+
+@router.get("/papers/{paper_id}/exports/{version}.pdf")
+def export_saved_pdf(
+    paper_id: str,
+    version: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    return _export_saved_paper(paper_id, version, "pdf", session, settings)
+
+
+@router.get("/papers/{paper_id}/exports/{version}.tex")
+def export_saved_tex(
+    paper_id: str,
+    version: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    return _export_saved_paper(paper_id, version, "tex", session, settings)
 
 
 @router.get("/drafts")
@@ -525,3 +600,7 @@ def publish_draft(
         return approve_draft(session, draft_id, request)
     except (DraftApprovalError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    BlueprintCreateRead,
+    PaperCreateRequest,
+    SavedPaperRead,
+    ValidationReportRead,

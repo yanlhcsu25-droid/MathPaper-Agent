@@ -1,4 +1,5 @@
-import random
+import hashlib
+from itertools import combinations
 from collections import Counter
 
 from sqlalchemy import select
@@ -10,51 +11,25 @@ from calculus_agent.schemas import ConstraintCheck, PaperBlueprint, PaperItemRea
 
 def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRead:
     rows = _candidates(session, blueprint)
-    random.Random(blueprint.seed).shuffle(rows)
-    selected: list[tuple[Question, list[str], bool]] = []
-    used: set[str] = set()
+    rows.sort(key=lambda row: (_seed_key(blueprint.seed, row[0].id), row[0].id))
     rows_by_id = {row[0].id: row for row in rows}
-
     required_ids = list(dict.fromkeys([*blueprint.locked_question_ids, *blueprint.manual_question_ids]))
-    missing_required: list[str] = []
-    for question_id in required_ids:
-        row = rows_by_id.get(question_id)
-        if row is None:
-            missing_required.append(question_id)
-            continue
-        selected.append(row)
-        used.add(question_id)
-
-    def take(predicate, count: int) -> None:
-        for row in rows:
-            if len([item for item in selected if predicate(item)]) >= count:
-                return
-            if row[0].id not in used and predicate(row):
+    missing_required = [question_id for question_id in required_ids if question_id not in rows_by_id]
+    required = [rows_by_id[question_id] for question_id in required_ids if question_id in rows_by_id]
+    selected = None if missing_required else _search(rows, required, blueprint)
+    if selected is None:
+        # A diagnostic preview may contain eligible supply, but is always marked infeasible.
+        eligible = [row for row in rows if _knowledge_allowed(row, blueprint)]
+        selected, seen = [], set()
+        for row in [*required, *eligible]:
+            if row[0].id not in seen and len(selected) < blueprint.total_questions:
                 selected.append(row)
-                used.add(row[0].id)
-
-    for quota in blueprint.knowledge_quotas:
-        take(lambda row, name=quota.name: name in row[1], quota.count)
-    if blueprint.image_question_count:
-        take(lambda row: row[2], blueprint.image_question_count)
-    for question_type, count in blueprint.question_type_counts.items():
-        take(
-            lambda row, value=question_type: row[0].question_type == value
-            and _knowledge_allowed(row, blueprint),
-            count,
-        )
-    take(lambda row: _knowledge_allowed(row, blueprint), blueprint.total_questions)
-
-    selected = selected[: blueprint.total_questions]
+                seen.add(row[0].id)
     if blueprint.question_order:
         order = {question_id: index for index, question_id in enumerate(blueprint.question_order)}
         original = {row[0].id: index for index, row in enumerate(selected)}
         selected.sort(key=lambda row: (order.get(row[0].id, len(order)), original[row[0].id]))
-    scores = _allocate_scores(
-        [question.id for question, _, _ in selected],
-        blueprint.total_score,
-        blueprint.score_overrides,
-    )
+    scores = _section_scores(selected, blueprint)
     items = [
         _item(question, knowledge, has_image, score)
         for (question, knowledge, has_image), score in zip(selected, scores)
@@ -77,9 +52,10 @@ def _candidates(session: Session, blueprint: PaperBlueprint):
         statement = statement.where(Question.id.not_in(blueprint.excluded_question_ids))
     if blueprint.grade:
         statement = statement.where(Question.grade == blueprint.grade)
+    # Unknown difficulty is never eligible for strict difficulty composition.
     statement = statement.where(
-        Question.difficulty.is_(None)
-        | Question.difficulty.between(blueprint.difficulty_min, blueprint.difficulty_max)
+        Question.difficulty.is_not(None),
+        Question.difficulty.between(blueprint.difficulty_min, blueprint.difficulty_max),
     )
     questions = list(session.scalars(statement).all())
     result = []
@@ -99,7 +75,72 @@ def _candidates(session: Session, blueprint: PaperBlueprint):
     return result
 
 
+def _seed_key(seed: int, question_id: str) -> str:
+    return hashlib.sha256(f"{seed}:{question_id}".encode()).hexdigest()
+
+
+def _search(rows, required, blueprint: PaperBlueprint):
+    required_ids = {row[0].id for row in required}
+    if len(required) > blueprint.total_questions or not all(
+        _knowledge_allowed(row, blueprint) for row in required
+    ):
+        return None
+    remaining = [row for row in rows if row[0].id not in required_ids and _knowledge_allowed(row, blueprint)]
+    needed = blueprint.total_questions - len(required)
+    # Exact type equations make shortages fail before search and greatly reduce the search space.
+    type_required = dict(blueprint.question_type_counts)
+    if type_required:
+        actual = Counter(row[0].question_type for row in required)
+        for question_type, count in type_required.items():
+            if actual[question_type] > count:
+                return None
+        if any(row[0].question_type not in type_required for row in required):
+            return None
+        pools = []
+        for question_type, count in type_required.items():
+            amount = count - actual[question_type]
+            pool = [row for row in remaining if row[0].question_type == question_type]
+            if len(pool) < amount:
+                return None
+            pools.append(list(combinations(pool, amount)))
+        def visit(index, chosen):
+            if index == len(pools):
+                candidate = [*required, *chosen]
+                return candidate if _hard_requirements(candidate, blueprint) else None
+            for group in pools[index]:
+                result = visit(index + 1, [*chosen, *group])
+                if result is not None:
+                    return result
+            return None
+        return visit(0, [])
+    for group in combinations(remaining, needed):
+        candidate = [*required, *group]
+        if _hard_requirements(candidate, blueprint):
+            return candidate
+    return None
+
+
+def _hard_requirements(rows, blueprint: PaperBlueprint) -> bool:
+    knowledge = Counter(name for row in rows for name in row[1])
+    return (
+        len(rows) == blueprint.total_questions
+        and sum(row[2] for row in rows) >= blueprint.image_question_count
+        and all(knowledge[quota.name] >= quota.count for quota in blueprint.knowledge_quotas)
+    )
+
+
+def _section_scores(selected, blueprint: PaperBlueprint) -> list[int]:
+    if blueprint.sections:
+        per_type = {item.question_type: item.score_per_question for item in blueprint.sections}
+        return [per_type[row[0].question_type] for row in selected]
+    return _allocate_scores(
+        [row[0].id for row in selected], blueprint.total_score, blueprint.score_overrides
+    )
+
+
 def _knowledge_allowed(row, blueprint: PaperBlueprint) -> bool:
+    if set(row[1]).intersection(blueprint.excluded_topics):
+        return False
     if not blueprint.strict_knowledge or not blueprint.knowledge_quotas:
         return True
     requested = {quota.name for quota in blueprint.knowledge_quotas}
@@ -183,7 +224,7 @@ def _checks(
                 name=f"题型：{question_type}",
                 required=required,
                 actual=actual,
-                satisfied=actual >= required,
+                satisfied=actual == required,
             )
         )
     for quota in blueprint.knowledge_quotas:
