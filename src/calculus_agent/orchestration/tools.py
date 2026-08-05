@@ -1,10 +1,10 @@
 import re
 from collections import Counter
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from calculus_agent.knowledge.retrieval import retrieve_knowledge
-from calculus_agent.models import KnowledgeNode, Question, QuestionKnowledgeLink
+from calculus_agent.models import KnowledgeNode, Question, QuestionDraft, QuestionKnowledgeLink
 from calculus_agent.orchestration.types import AgentRunContext, AgentTool
 from calculus_agent.papers.selector import compose_paper
 from calculus_agent.schemas import PaperBlueprint
@@ -44,13 +44,19 @@ def knowledge_tools(context: AgentRunContext) -> list[AgentTool]:
         if difficulty_min is not None or difficulty_max is not None:
             minimum = float(difficulty_min if difficulty_min is not None else 0)
             maximum = float(difficulty_max if difficulty_max is not None else 1)
-            statement = statement.where(Question.difficulty.between(minimum, maximum))
+            statement = statement.where(
+                or_(
+                    Question.difficulty.is_(None),
+                    Question.difficulty.between(minimum, maximum),
+                )
+            )
         questions = list(context.session.scalars(statement).all())
         requested_knowledge = {
             str(item).strip() for item in arguments.get("knowledge_names", []) if str(item).strip()
         }
         knowledge_counts: Counter[str] = Counter()
         accepted = []
+        with_images = 0
         for question in questions:
             names = set(
                 context.session.scalars(
@@ -65,12 +71,15 @@ def knowledge_tools(context: AgentRunContext) -> list[AgentTool]:
             if requested_knowledge and not requested_knowledge.intersection(names):
                 continue
             accepted.append(question)
+            draft = context.session.get(QuestionDraft, question.draft_id)
+            with_images += bool(draft and draft.image_path)
             knowledge_counts.update(names)
         return {
             "total": len(accepted),
             "by_question_type": dict(Counter(item.question_type for item in accepted)),
             "by_knowledge": dict(knowledge_counts.most_common(20)),
             "unknown_difficulty": sum(item.difficulty is None for item in accepted),
+            "with_images": with_images,
         }
 
     return [
@@ -170,6 +179,23 @@ def review_tools(context: AgentRunContext) -> list[AgentTool]:
                         "message": "题目缺少答案解析",
                     }
                 )
+            broken_commands = sorted(
+                set(
+                    re.findall(
+                        r"(?<!\\)\b(?:frac|times|therefore|because|cdot|neq|geqslant|leqslant)\b",
+                        item.question_text + "\n" + "\n".join(item.solution_steps),
+                    )
+                )
+            )
+            if broken_commands:
+                issues.append(
+                    {
+                        "code": "BROKEN_LATEX",
+                        "severity": "error",
+                        "question_ids": [item.question_id],
+                        "message": "疑似损坏的 LaTeX 命令：" + "、".join(broken_commands),
+                    }
+                )
         for ids in fingerprints.values():
             if len(ids) > 1:
                 issues.append(
@@ -193,7 +219,7 @@ def review_tools(context: AgentRunContext) -> list[AgentTool]:
     return [
         AgentTool(
             name="validate_current_paper",
-            description="审核当前试卷的硬约束、答案完整性、解析完整性和完全重复题。",
+            description="审核当前试卷的硬约束、图片要求、答案解析、公式完整性和完全重复题。",
             parameters={"type": "object", "properties": {}},
             handler=validate,
         )

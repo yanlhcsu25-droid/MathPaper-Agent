@@ -24,27 +24,14 @@ def render_paper_latex(paper: PaperPreviewRead, *, teacher_version: bool) -> str
             [
                 f"\\question{{{section_index}}}{{{item.score}}}{{{_mixed_latex(stem)}}}",
                 _options_table(options),
-                f"\\vspace{{{space}}}",
             ]
         )
+        if teacher_version:
+            sections.extend(_teacher_answer_latex(item))
+        else:
+            sections.append(f"\\vspace{{{space}}}")
 
-    answers: list[str] = []
-    if teacher_version:
-        answers.extend(["\\clearpage", "\\section*{参考答案与解析}"])
-        for index, item in enumerate(paper.items, start=1):
-            answers.append(f"\\subsection*{{第 {index} 题}}")
-            answers.append(
-                f"\\textbf{{答案：}}{_mixed_latex(item.final_answer or '暂无独立答案')}\\par"
-            )
-            if item.solution_steps:
-                answers.append("\\begin{enumerate}[label=\\arabic*.,leftmargin=2em]")
-                answers.extend(f"\\item {_mixed_latex(step)}" for step in item.solution_steps)
-                answers.append("\\end{enumerate}")
-            if item.knowledge:
-                knowledge = _latex_text("、".join(item.knowledge))
-                answers.append(f"\\noindent\\textcolor{{slate}}{{知识点：{knowledge}}}\\par")
-
-    body = "\n\n".join(sections + answers)
+    body = "\n\n".join(sections)
     return rf"""\documentclass[UTF8,12pt,a4paper]{{ctexart}}
 \usepackage{{amsmath,amssymb,mathtools}}
 \usepackage[margin=2cm,headheight=15pt]{{geometry}}
@@ -58,6 +45,7 @@ def render_paper_latex(paper: PaperPreviewRead, *, teacher_version: bool) -> str
 \setlength{{\parindent}}{{0pt}}
 \setlength{{\parskip}}{{0.45em}}
 \newcommand{{\question}}[3]{{\noindent\textbf{{#1.}}\hspace{{0.35em}}#3\hfill\textcolor{{slate}}{{（#2分）}}\par}}
+\newenvironment{{teacheranswer}}{{\begin{{quote}}\small\color{{accent}}}}{{\end{{quote}}}}
 \ctexset{{section={{format=\normalsize\bfseries\color{{accent}},beforeskip=1.1em,afterskip=0.7em}}}}
 
 \begin{{document}}
@@ -70,6 +58,21 @@ def render_paper_latex(paper: PaperPreviewRead, *, teacher_version: bool) -> str
 
 \end{{document}}
 """
+
+
+def _teacher_answer_latex(item) -> list[str]:
+    answer = _mixed_latex(item.final_answer or "暂无独立答案")
+    result = ["\\begin{teacheranswer}", f"\\textbf{{答案：}}{answer}\\par"]
+    if item.solution_steps:
+        result.append("\\textbf{解析：}")
+        result.append("\\begin{enumerate}[label=\\arabic*.,leftmargin=2em,topsep=0.2em]")
+        result.extend(f"\\item {_mixed_latex(step)}" for step in item.solution_steps)
+        result.append("\\end{enumerate}")
+    if item.knowledge:
+        knowledge = _latex_text("、".join(item.knowledge))
+        result.append(f"\\noindent\\textcolor{{slate}}{{知识点：{knowledge}}}\\par")
+    result.extend(["\\end{teacheranswer}", "\\vspace{0.5cm}"])
+    return result
 
 
 def _section_title(paper: PaperPreviewRead, question_type: str) -> str:

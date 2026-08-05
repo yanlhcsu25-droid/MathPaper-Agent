@@ -1,6 +1,6 @@
 # MathPaper Agent
 
-面向中文初中数学教师的知识约束智能组卷系统。教师可以直接描述试卷要求，系统将其转换为可检查的结构化蓝图，再由确定性算法从题库选题，最终生成学生试卷和教师答案解析 PDF。
+面向中文初中数学教师的智能备课工作台。教师可以围绕学生错题建立备课任务、匹配巩固题，也可以描述试卷要求，由系统生成可检查、可复现的学生卷和教师解析卷。
 
 > 当前项目由旧高数原型独立重构而来，Python 包名暂时保留为 `calculus_agent`，不影响运行；后续稳定数据库迁移后再统一改名。
 
@@ -19,32 +19,56 @@ CMM-Math 中文题目、答案与解析
 
 LLM 只负责理解语言和整理解析，不直接决定最终选题。相同题库、蓝图和随机种子会产生可复现结果；题库不足时返回具体未满足约束，不会偷偷降低要求。
 
-## Agent 调度架构
+## Agent 与确定性工具的分工
 
-系统同时保留单 Agent 基线和多 Agent 路径，用于真实对比，而不是默认假设多 Agent 更好：
+Agent 负责理解自然语言教学要求；题库统计、组卷和审核由程序强制按阶段执行，避免小模型跳过工具或编造题库内容：
 
 ```text
-PaperOrchestratorAgent
-├── delegate_agent → KnowledgeStewardAgent
-│   ├── search_knowledge
-│   └── inspect_question_supply
-├── compose_paper（确定性工具）
-└── delegate_agent → PaperReviewerAgent
-    └── validate_current_paper
+RequirementAgent（结构化蓝图）
+→ KnowledgeStewardAgent（题库供给证据）
+→ PaperComposerAgent（确定性组卷）
+→ PaperReviewerAgent（约束、答案和解析审核）
 ```
 
-子 Agent拥有独立消息上下文和工具白名单，不能继续创建下级 Agent。每次运行限制最大工具步数和最大委托次数，并拦截连续重复调用。调用主体、参数、结果、状态和耗时持久化为轨迹。
+阶段顺序由代码保证，调用主体、参数、结果、状态和耗时会持久化为轨迹。基础组卷本身不依赖模型。
+
+## 错题备课任务
+
+第一版不识别学生手写答案，也不推断学生为何出错。教师录入错题、标准答案、标准解析，以及由教师或 ChatGPT 确认的错误原因，并指定年级、知识点、题型和目标难度。系统保存任务后，从已审核题库中按以下规则匹配巩固题：
+
+```text
+年级硬过滤
+→ 知识点必须重合
+→ 同题型加权
+→ 难度接近度排序
+→ 返回题目、答案、解析和匹配依据
+```
+
+该结构后续可直接作为讲义和 PPT 的统一内容来源，并在真实匹配案例积累后加入向量检索与教材 RAG。
+
+错题表单支持上传标准印刷题图片，以及可选的答案/解析图片。百炼视觉模型会识别题干、选项、公式、题型、答案、解析和知识点，并回填到表单；教师检查修改后才会保存任务。配置：
+
+```env
+CALCULUS_AGENT_BAILIAN_API_KEY=你的百炼API-Key
+CALCULUS_AGENT_BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+CALCULUS_AGENT_BAILIAN_VISION_MODEL=qwen3-vl-plus
+```
+
+也可以使用百炼控制台提供的业务空间专属兼容端点替换 `BASE_URL`。API Key 只能保存在本地 `.env`，不要提交到 Git。
 
 ## 已实现
 
 - CMM-Math JSONL 适配，可筛选初中年级、纯文本题以及带完整解析的记录；
 - MM-Math 适配与字段审计保留为英文多模态数据实验入口；
 - 可信公开数据集批量发布；以后 OCR/教师自有题目仍可走草稿审核流程；
-- `qwen3:14b` 本地自然语言组卷需求解析；
+- 阿里云百炼 `qwen-plus` 多 Agent 组卷需求解析；
 - 年级和难度显式表达的规则兜底；
 - 年级、难度、题型数量、知识点配额、总题量和总分约束；
 - 约束报告和无法组卷原因；
 - React + TypeScript + Ant Design 教师端；
+- 错题、标准答案、标准解析和错误原因的结构化备课任务；
+- 根据知识点、题型与难度匹配巩固题，并保留匹配依据；
+- 阿里云百炼标准印刷题图片识别，并将结构化结果回填到教师审核表单；
 - 支持锁定满意题目、单题换题和排除已换题目，重组后重新验证全部约束；
 - 支持保存试卷草稿、浏览历史版本、载入旧版本并另存为新版本；
 - 支持按题干搜索已审核题库、手动加题、调整题序和覆盖单题分值；
@@ -86,12 +110,13 @@ HOST=0.0.0.0 ./scripts/start.sh
 朋友打开 `http://你的电脑IP:5173`。你的电脑需要保持开机，且防火墙需要允许
 5173和8000端口。正式公网试用仍应部署到服务器，不要直接暴露开发服务。
 
-基础组卷、锁题换题、版本保存和PDF导出不依赖 Ollama。自然语言解析与多 Agent
-调度是可选能力；需要时启动 Ollama 并安装 `qwen3:14b`：
+基础组卷、锁题换题、版本保存和PDF导出不依赖模型 API。多 Agent 调度使用阿里云百炼，
+在 `.env` 中配置以下字段：
 
 ```bash
-ollama serve
-ollama pull qwen3:14b
+CALCULUS_AGENT_BAILIAN_API_KEY=你的百炼API密钥
+CALCULUS_AGENT_BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+CALCULUS_AGENT_BAILIAN_AGENT_MODEL=qwen-plus
 ```
 
 后端 API 文档位于 `http://127.0.0.1:8000/docs`。
@@ -114,13 +139,13 @@ export MATH_PAPER_FONT_PATH=/path/to/NotoSansCJK-Regular.ttc
   "text_only": true,
   "require_analysis": true,
   "limit": 3000,
-  "publish": true
+  "publish": false
 }
 ```
 
 首版建议保持 `text_only=true`，因为当前 PDF 渲染链路尚未支持题目多图。
-`require_analysis=true` 会排除只有答案、没有解析的记录。`publish=true`
-仅适用于已经确认来源和字段质量的可信数据；教师后续上传或 OCR
+`require_analysis=true` 会排除只有答案、没有解析的记录。CMM-Math 默认进入待审核区；`publish=true`
+仅适用于已经抽样检查并确认公式、题型、答案和解析质量的数据；教师后续上传或 OCR
 识别的内容不应跳过审核。完整审计见
 [数据集审计](docs/dataset-audit.md)。
 

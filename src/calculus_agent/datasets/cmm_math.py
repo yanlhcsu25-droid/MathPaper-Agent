@@ -5,8 +5,9 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from calculus_agent.knowledge.normalization import normalize_name
 from calculus_agent.datasets.mm_math import _fingerprint, _publish_trusted, _records
-from calculus_agent.models import QuestionDraft
+from calculus_agent.models import KnowledgeNode, Question, QuestionDraft, QuestionKnowledgeLink
 from calculus_agent.schemas import DatasetImportSummary
 
 SOURCE_NAME = "CMM-Math"
@@ -63,7 +64,7 @@ def import_cmm_math(
         if options:
             question_text = f"{question}\n" + "\n".join(options)
         subject = _clean(record.get("subject"))
-        knowledge = [subject] if subject else []
+        knowledge = _knowledge_names(subject, question, answer, analysis)
         solution = analysis or f"参考答案：{answer}"
         draft = QuestionDraft(
             source_name=SOURCE_NAME,
@@ -103,11 +104,76 @@ def import_cmm_math(
     return DatasetImportSummary(created=created, existing=existing, skipped=skipped)
 
 
+def backfill_cmm_math_knowledge(session: Session) -> dict[str, int]:
+    """Add explicit concepts found in trusted CMM-Math text to published questions."""
+    added = scanned = 0
+    rows = session.execute(
+        select(QuestionDraft, Question)
+        .join(Question, Question.draft_id == QuestionDraft.id)
+        .where(QuestionDraft.source_name == SOURCE_NAME)
+    ).all()
+    for draft, question in rows:
+        scanned += 1
+        names = _knowledge_names(
+            draft.source_topic,
+            draft.question_text,
+            " ".join(draft.reference_answers_json or []),
+            draft.solution_text,
+        )
+        for name in names[1:] if draft.source_topic else names:
+            normalized = normalize_name(name)
+            node = session.scalar(
+                select(KnowledgeNode).where(
+                    KnowledgeNode.node_type == "concept",
+                    KnowledgeNode.normalized_name == normalized,
+                )
+            )
+            if node is None:
+                node = KnowledgeNode(
+                    node_type="concept",
+                    name=name,
+                    normalized_name=normalized,
+                    source_type="trusted_dataset",
+                    confidence=1.0,
+                    review_status="approved",
+                )
+                session.add(node)
+                session.flush()
+            exists = session.scalar(
+                select(QuestionKnowledgeLink).where(
+                    QuestionKnowledgeLink.question_id == question.id,
+                    QuestionKnowledgeLink.knowledge_node_id == node.id,
+                )
+            )
+            if exists is None:
+                session.add(
+                    QuestionKnowledgeLink(
+                        question_id=question.id,
+                        knowledge_node_id=node.id,
+                        relation_type="secondary_concept",
+                        confidence=1.0,
+                        evidence_json=["CMM-Math 题干/解析显式术语"],
+                    )
+                )
+                added += 1
+    session.flush()
+    return {"scanned": scanned, "added": added}
+
+
 def _clean(value) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return None if not text or text.lower() == "null" else text
+
+
+def _knowledge_names(subject: str | None, *texts: str | None) -> list[str]:
+    names = [subject] if subject else []
+    content = "\n".join(text for text in texts if text)
+    for concept in ("一次函数", "二次函数", "反比例函数", "正比例函数"):
+        if concept in content and concept not in names:
+            names.append(concept)
+    return names
 
 
 def _images(value) -> list[str]:

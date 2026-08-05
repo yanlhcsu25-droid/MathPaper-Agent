@@ -20,7 +20,7 @@ class AgentTool:
     parameters: dict
     handler: ToolHandler
 
-    def ollama_schema(self) -> dict:
+    def chat_schema(self) -> dict:
         return {
             "type": "function",
             "function": {
@@ -29,6 +29,10 @@ class AgentTool:
                 "parameters": self.parameters,
             },
         }
+
+    def ollama_schema(self) -> dict:
+        """Backward-compatible alias for existing integrations."""
+        return self.chat_schema()
 
 
 @dataclass

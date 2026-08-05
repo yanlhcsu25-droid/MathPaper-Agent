@@ -4,6 +4,7 @@
 __pycache__/
 *.py[cod]
 *.db
+*.db.backup-*
 .env
 output/
 tmp/

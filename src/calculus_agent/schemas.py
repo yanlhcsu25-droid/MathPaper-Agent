@@ -56,7 +56,7 @@ class CMMMathImportRequest(BaseModel):
     text_only: bool = True
     require_analysis: bool = True
     limit: int | None = Field(default=None, ge=1, le=50000)
-    publish: bool = True
+    publish: bool = False
 
 
 class DatasetImportSummary(BaseModel):
@@ -127,6 +127,8 @@ class PaperBlueprint(BaseModel):
     difficulty_max: float = Field(default=1.0, ge=0, le=1)
     question_type_counts: dict[str, int] = Field(default_factory=dict)
     knowledge_quotas: list[KnowledgeQuota] = Field(default_factory=list)
+    image_question_count: int = Field(default=0, ge=0, le=100)
+    strict_knowledge: bool = False
     locked_question_ids: list[str] = Field(default_factory=list)
     manual_question_ids: list[str] = Field(default_factory=list)
     excluded_question_ids: list[str] = Field(default_factory=list)
@@ -140,6 +142,8 @@ class PaperBlueprint(BaseModel):
             raise ValueError("difficulty_min cannot exceed difficulty_max")
         if sum(self.question_type_counts.values()) > self.total_questions:
             raise ValueError("题型数量之和不能超过题目总数")
+        if self.image_question_count > self.total_questions:
+            raise ValueError("图片题数量不能超过题目总数")
         if len(set(self.locked_question_ids)) != len(self.locked_question_ids):
             raise ValueError("锁定题目不能重复")
         if len(self.locked_question_ids) > self.total_questions:
@@ -177,6 +181,60 @@ class PaperItemRead(BaseModel):
     knowledge: list[str] = Field(default_factory=list)
     final_answer: str | None = None
     solution_steps: list[str] = Field(default_factory=list)
+    has_image: bool = False
+
+
+class MistakePrepCreate(BaseModel):
+    grade: str | None = None
+    question_text: str = Field(min_length=2, max_length=10000)
+    final_answer: str = Field(min_length=1, max_length=5000)
+    solution_text: str = Field(min_length=2, max_length=20000)
+    error_reason: str = Field(min_length=2, max_length=5000)
+    question_type: str | None = None
+    target_difficulty: float = Field(default=0.5, ge=0, le=1)
+    knowledge_names: list[str] = Field(min_length=1, max_length=20)
+    match_count: int = Field(default=5, ge=1, le=20)
+
+
+class MistakePrepMatchRead(BaseModel):
+    question_id: str
+    question_text: str
+    question_type: str
+    difficulty: float | None
+    final_answer: str | None
+    solution_steps: list[str] = Field(default_factory=list)
+    knowledge: list[str] = Field(default_factory=list)
+    match_reasons: list[str] = Field(default_factory=list)
+
+
+class MistakePrepRead(BaseModel):
+    id: str
+    grade: str | None
+    question_text: str
+    final_answer: str
+    solution_text: str
+    error_reason: str
+    question_type: str | None
+    target_difficulty: float
+    knowledge_names: list[str]
+    matches: list[MistakePrepMatchRead]
+    created_at: datetime
+
+
+class VisionQuestionExtractRequest(BaseModel):
+    question_image: str = Field(min_length=20, max_length=30_000_000)
+    solution_image: str | None = Field(default=None, max_length=30_000_000)
+
+
+class VisionQuestionExtractRead(BaseModel):
+    question_text: str
+    options: list[str] = Field(default_factory=list)
+    question_type: str
+    final_answer: str
+    solution_text: str
+    knowledge_names: list[str] = Field(default_factory=list)
+    needs_review: bool = True
+    warnings: list[str] = Field(default_factory=list)
 
 
 class QuestionOptionRead(BaseModel):

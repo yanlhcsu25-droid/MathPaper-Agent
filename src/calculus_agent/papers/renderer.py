@@ -14,7 +14,6 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     CondPageBreak,
     KeepTogether,
-    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -71,6 +70,8 @@ def render_paper_pdf(paper: PaperPreviewRead, *, teacher_version: bool) -> bytes
             )
         section_index += 1
         question_flowables = _question_flowables(item, section_index, styles)
+        if teacher_version:
+            question_flowables.extend(_teacher_answer_flowables(item, styles))
         if item.question_type == "解答题" and not teacher_version:
             answer_height = _answer_space_mm(item.score) * mm
             story.extend(
@@ -86,21 +87,6 @@ def render_paper_pdf(paper: PaperPreviewRead, *, teacher_version: bool) -> bytes
                     Spacer(1, 6 * mm if item.question_type == "选择题" else 4 * mm),
                 ]
             )
-
-    if teacher_version:
-        story.extend([PageBreak(), Paragraph("参考答案与解析", styles["title"]), Spacer(1, 6 * mm)])
-        for index, item in enumerate(paper.items, start=1):
-            story.append(Paragraph(f"第 {index} 题", styles["answer_title"]))
-            story.append(
-                Paragraph(f"答案：{escape(item.final_answer or '暂无独立答案')}", styles["answer"])
-            )
-            for step_index, step in enumerate(item.solution_steps, start=1):
-                story.append(Paragraph(f"{step_index}. {escape(step)}", styles["answer"]))
-            if item.knowledge:
-                story.append(
-                    Paragraph(f"知识点：{escape('、'.join(item.knowledge))}", styles["meta"])
-                )
-            story.append(Spacer(1, 5 * mm))
 
     doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
     return buffer.getvalue()
@@ -143,13 +129,14 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=colors.HexColor("#111827"),
             wordWrap="CJK",
         ),
-        "answer_title": ParagraphStyle(
-            "answer_title",
+        "answer_label": ParagraphStyle(
+            "answer_label",
             fontName=FONT,
-            fontSize=12,
-            leading=20,
+            fontSize=10.5,
+            leading=18,
             textColor=colors.HexColor("#1D4ED8"),
             spaceAfter=3,
+            leftIndent=8 * mm,
         ),
         "answer": ParagraphStyle(
             "answer",
@@ -158,6 +145,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=18,
             textColor=colors.HexColor("#1F2937"),
             wordWrap="CJK",
+            leftIndent=8 * mm,
         ),
         "meta": ParagraphStyle(
             "meta",
@@ -166,6 +154,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=16,
             textColor=colors.HexColor("#64748B"),
             wordWrap="CJK",
+            leftIndent=8 * mm,
         ),
     }
 
@@ -237,6 +226,24 @@ def _question_flowables(item, index: int, styles: dict[str, ParagraphStyle]) -> 
                 ),
             ]
         )
+    return result
+
+
+def _teacher_answer_flowables(item, styles: dict[str, ParagraphStyle]) -> list:
+    result = [
+        Spacer(1, 2 * mm),
+        Paragraph(
+            f"答案：{escape(item.final_answer or '暂无独立答案')}", styles["answer_label"]
+        ),
+    ]
+    if item.solution_steps:
+        result.append(Paragraph("解析：", styles["answer_label"]))
+        result.extend(
+            Paragraph(f"{index}. {escape(step)}", styles["answer"])
+            for index, step in enumerate(item.solution_steps, start=1)
+        )
+    if item.knowledge:
+        result.append(Paragraph(f"知识点：{escape('、'.join(item.knowledge))}", styles["meta"]))
     return result
 
 

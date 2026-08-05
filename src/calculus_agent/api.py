@@ -35,6 +35,8 @@ from calculus_agent.papers.drafts import (
     save_paper_draft,
 )
 from calculus_agent.papers.pdf_export import export_paper_pdf as build_paper_pdf
+from calculus_agent.prep.mistakes import create_mistake_prep, get_mistake_prep
+from calculus_agent.prep.vision import BailianVisionExtractor as SiliconFlowVisionExtractor
 from calculus_agent.papers.latex_renderer import render_paper_latex
 from calculus_agent.questions.review import DraftApprovalError, approve_draft
 from calculus_agent.requirements.parser import OllamaRequirementParser
@@ -51,6 +53,8 @@ from calculus_agent.schemas import (
     KnowledgeNodeCreate,
     KnowledgeNodeRead,
     MMMathImportRequest,
+    MistakePrepCreate,
+    MistakePrepRead,
     NaturalLanguagePaperRequest,
     PaperBlueprint,
     PaperDraftCreate,
@@ -58,6 +62,8 @@ from calculus_agent.schemas import (
     PaperDraftRead,
     PaperPreviewRead,
     QuestionRead,
+    VisionQuestionExtractRead,
+    VisionQuestionExtractRequest,
     QuestionOptionRead,
     ToolCallTraceRead,
 )
@@ -79,18 +85,68 @@ def health() -> dict[str, str]:
     return {"status": "ok", "application": "math-paper-agent"}
 
 
+@router.post("/prep/mistakes", response_model=MistakePrepRead)
+def create_mistake_prep_task(
+    request: MistakePrepCreate, session: Session = Depends(get_session)
+) -> MistakePrepRead:
+    return create_mistake_prep(session, request)
+
+
+@router.get("/prep/mistakes/{task_id}", response_model=MistakePrepRead)
+def mistake_prep_task(
+    task_id: str, session: Session = Depends(get_session)
+) -> MistakePrepRead:
+    result = get_mistake_prep(session, task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="错题备课任务不存在")
+    return result
+
+
+@router.post("/prep/vision/extract", response_model=VisionQuestionExtractRead)
+def extract_question_images(
+    request: VisionQuestionExtractRequest,
+    settings: Settings = Depends(get_settings),
+) -> VisionQuestionExtractRead:
+    if not settings.siliconflow_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="尚未配置 SiliconFlow API Key，请设置 SILICONFLOW_API_KEY",
+        )
+    extractor = SiliconFlowVisionExtractor(
+        api_key=settings.siliconflow_api_key,
+        base_url=settings.siliconflow_base_url,
+        model=settings.siliconflow_vl_model,
+        timeout=settings.siliconflow_timeout_seconds,
+    )
+    try:
+        return extractor.extract(request.question_image, request.solution_image)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"SiliconFlow 视觉识别失败：{error}",
+        ) from error
+
+
 @router.post("/agents/runs", response_model=AgentRunRead)
 def create_agent_run(
     request: AgentRunRequest,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> AgentRunRead:
+    if not settings.siliconflow_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="尚未配置 SiliconFlow API Key，请设置 SILICONFLOW_API_KEY",
+        )
     return run_paper_agent(
         session,
         request,
-        base_url=settings.ollama_base_url,
-        model=settings.solver_model,
-        timeout=settings.solver_timeout_seconds,
+        api_key=settings.siliconflow_api_key,
+        base_url=settings.siliconflow_base_url,
+        model=settings.siliconflow_agent_model,
+        timeout=settings.siliconflow_timeout_seconds,
     )
 
 

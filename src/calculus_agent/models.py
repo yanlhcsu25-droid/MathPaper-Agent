@@ -139,6 +139,24 @@ class PaperDraft(Base):
     )
 
 
+class MistakePrepTask(Base):
+    __tablename__ = "mistake_prep_task"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grade: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    question_text: Mapped[str] = mapped_column(Text)
+    final_answer: Mapped[str] = mapped_column(Text)
+    solution_text: Mapped[str] = mapped_column(Text)
+    error_reason: Mapped[str] = mapped_column(Text)
+    question_type: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    target_difficulty: Mapped[float] = mapped_column(Float, default=0.5)
+    knowledge_names_json: Mapped[list] = mapped_column(JSON, default=list)
+    matched_question_ids_json: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class AgentRun(Base):
     __tablename__ = "agent_run"
 

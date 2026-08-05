@@ -19,3 +19,17 @@ def test_junior_grade_alias_is_normalized():
     blueprint = PaperBlueprint(total_questions=5)
     result = apply_explicit_constraints("初二年级基础练习", blueprint)
     assert result.grade == "八年级"
+
+
+def test_explicit_knowledge_and_image_constraints_override_model():
+    blueprint = PaperBlueprint(
+        total_questions=10,
+        knowledge_quotas=[{"name": "一次函数", "count": 5}],
+    )
+    result = apply_explicit_constraints(
+        "一次函数测试卷，二次函数至少5题，需要含图片", blueprint
+    )
+    assert [(item.name, item.count) for item in result.knowledge_quotas] == [
+        ("二次函数", 5)
+    ]
+    assert result.image_question_count == 1

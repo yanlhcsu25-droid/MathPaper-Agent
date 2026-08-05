@@ -4,14 +4,14 @@ from collections import Counter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from calculus_agent.models import KnowledgeNode, Question, QuestionKnowledgeLink
+from calculus_agent.models import KnowledgeNode, Question, QuestionDraft, QuestionKnowledgeLink
 from calculus_agent.schemas import ConstraintCheck, PaperBlueprint, PaperItemRead, PaperPreviewRead
 
 
 def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRead:
     rows = _candidates(session, blueprint)
     random.Random(blueprint.seed).shuffle(rows)
-    selected: list[tuple[Question, list[str]]] = []
+    selected: list[tuple[Question, list[str], bool]] = []
     used: set[str] = set()
     rows_by_id = {row[0].id: row for row in rows}
 
@@ -35,9 +35,15 @@ def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRe
 
     for quota in blueprint.knowledge_quotas:
         take(lambda row, name=quota.name: name in row[1], quota.count)
+    if blueprint.image_question_count:
+        take(lambda row: row[2], blueprint.image_question_count)
     for question_type, count in blueprint.question_type_counts.items():
-        take(lambda row, value=question_type: row[0].question_type == value, count)
-    take(lambda _: True, blueprint.total_questions)
+        take(
+            lambda row, value=question_type: row[0].question_type == value
+            and _knowledge_allowed(row, blueprint),
+            count,
+        )
+    take(lambda row: _knowledge_allowed(row, blueprint), blueprint.total_questions)
 
     selected = selected[: blueprint.total_questions]
     if blueprint.question_order:
@@ -45,12 +51,13 @@ def compose_paper(session: Session, blueprint: PaperBlueprint) -> PaperPreviewRe
         original = {row[0].id: index for index, row in enumerate(selected)}
         selected.sort(key=lambda row: (order.get(row[0].id, len(order)), original[row[0].id]))
     scores = _allocate_scores(
-        [question.id for question, _ in selected],
+        [question.id for question, _, _ in selected],
         blueprint.total_score,
         blueprint.score_overrides,
     )
     items = [
-        _item(question, knowledge, score) for (question, knowledge), score in zip(selected, scores)
+        _item(question, knowledge, has_image, score)
+        for (question, knowledge, has_image), score in zip(selected, scores)
     ]
     checks = _checks(blueprint, items, missing_required)
     warnings = [f"未满足约束：{check.name}" for check in checks if not check.satisfied]
@@ -87,8 +94,16 @@ def _candidates(session: Session, blueprint: PaperBlueprint):
                 .where(QuestionKnowledgeLink.question_id == question.id)
             ).all()
         )
-        result.append((question, names))
+        draft = session.get(QuestionDraft, question.draft_id)
+        result.append((question, names, bool(draft and draft.image_path)))
     return result
+
+
+def _knowledge_allowed(row, blueprint: PaperBlueprint) -> bool:
+    if not blueprint.strict_knowledge or not blueprint.knowledge_quotas:
+        return True
+    requested = {quota.name for quota in blueprint.knowledge_quotas}
+    return bool(requested.intersection(row[1]))
 
 
 def _allocate_scores(
@@ -114,7 +129,9 @@ def _allocate_scores(
     ]
 
 
-def _item(question: Question, knowledge: list[str], score: int) -> PaperItemRead:
+def _item(
+    question: Question, knowledge: list[str], has_image: bool, score: int
+) -> PaperItemRead:
     steps = question.solution_json.get("solution_steps", []) if question.solution_json else []
     return PaperItemRead(
         question_id=question.id,
@@ -125,6 +142,7 @@ def _item(question: Question, knowledge: list[str], score: int) -> PaperItemRead
         knowledge=knowledge,
         final_answer=question.final_answer,
         solution_steps=steps,
+        has_image=has_image,
     )
 
 
@@ -135,6 +153,7 @@ def _checks(
 ) -> list[ConstraintCheck]:
     type_counts = Counter(item.question_type for item in items)
     knowledge_counts = Counter(name for item in items for name in item.knowledge)
+    image_count = sum(item.has_image for item in items)
     checks = [
         ConstraintCheck(
             name="题目总数",
@@ -177,4 +196,12 @@ def _checks(
                 satisfied=actual >= quota.count,
             )
         )
+    checks.append(
+        ConstraintCheck(
+            name="图片题数量",
+            required=blueprint.image_question_count,
+            actual=image_count,
+            satisfied=image_count >= blueprint.image_question_count,
+        )
+    )
     return checks
