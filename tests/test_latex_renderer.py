@@ -30,10 +30,17 @@ def test_student_latex_escapes_prose_and_preserves_math():
     assert r"$y=\frac{1}{2}x+3$" in result
     assert r"50\%" in result
     assert "参考答案与解析" not in result
+    assert "解答应写出文字说明、证明过程或演算步骤" in result
+    assert r"\Needspace{9.4cm}" in result
 
 
 def test_teacher_latex_contains_solution():
     result = render_paper_latex(_paper(), teacher_version=True)
-    assert "参考答案与解析" in result
+    question_position = result.index(r"\question{1}")
+    answer_position = result.index("答案：")
+    assert answer_position > question_position
+    assert "参考答案与解析" not in result
+    assert r"\clearpage" not in result
+    assert "解析：" in result
     assert r"$\frac{1}{2}$" in result
     assert "知识点：一次函数" in result

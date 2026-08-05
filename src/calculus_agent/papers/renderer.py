@@ -1,6 +1,7 @@
 from io import BytesIO
 import os
 from pathlib import Path
+import re
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -9,8 +10,16 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
+from reportlab.platypus import (
+    CondPageBreak,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from calculus_agent.schemas import PaperPreviewRead
 
@@ -21,10 +30,23 @@ _FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 ]
-_font_path = next((path for path in _FONT_CANDIDATES if path and Path(path).is_file()), None)
-if _font_path is None:
-    raise RuntimeError("未找到中文字体，请设置 MATH_PAPER_FONT_PATH")
-pdfmetrics.registerFont(TTFont(FONT, _font_path))
+
+
+def _register_cjk_font() -> str:
+    errors = []
+    for path in _FONT_CANDIDATES:
+        if not path or not Path(path).is_file():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(FONT, path))
+            return path
+        except (OSError, TTFError) as error:
+            errors.append(f"{path}: {error}")
+    detail = f"；已尝试：{' | '.join(errors)}" if errors else ""
+    raise RuntimeError(f"未找到ReportLab兼容的中文TrueType字体，请设置MATH_PAPER_FONT_PATH{detail}")
+
+
+_font_path = _register_cjk_font()
 
 
 def render_paper_pdf(paper: PaperPreviewRead, *, teacher_version: bool) -> bytes:
@@ -41,56 +63,43 @@ def render_paper_pdf(paper: PaperPreviewRead, *, teacher_version: bool) -> bytes
     )
     styles = _styles()
     story = [
+        Spacer(1, 2 * mm),
         Paragraph(
-            escape(paper.title + (" - 教师解析卷" if teacher_version else "")), styles["title"]
-        ),
-        Spacer(1, 4 * mm),
-        Table(
-            [["姓名：________________", "班级：________________", f"满分：{paper.total_score} 分"]],
-            colWidths=[60 * mm, 60 * mm, 45 * mm],
-            style=TableStyle(
-                [
-                    ("FONTNAME", (0, 0), (-1, -1), FONT),
-                    ("FONTSIZE", (0, 0), (-1, -1), 10),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                    ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-                ]
-            ),
+            escape(paper.title + ("（教师解析卷）" if teacher_version else "")), styles["title"]
         ),
         Spacer(1, 7 * mm),
     ]
     current_type = None
-    for index, item in enumerate(paper.items, start=1):
+    section_index = 0
+    for item in paper.items:
         if item.question_type != current_type:
             current_type = item.question_type
+            section_index = 0
             story.extend(
                 [
-                    Paragraph(escape(current_type), styles["section"]),
-                    Spacer(1, 2 * mm),
+                    Paragraph(_section_title(paper, current_type), styles["section"]),
+                    Spacer(1, 3 * mm),
                 ]
             )
-        story.append(
-            Paragraph(
-                f"{index}. {escape(item.question_text)} <font color='#64748B'>（{item.score}分）</font>",
-                styles["question"],
+        section_index += 1
+        question_flowables = _question_flowables(item, section_index, styles)
+        if teacher_version:
+            question_flowables.extend(_teacher_answer_flowables(item, styles))
+        if item.question_type == "解答题" and not teacher_version:
+            answer_height = _answer_space_mm(item.score) * mm
+            story.extend(
+                [
+                    CondPageBreak(answer_height + 24 * mm),
+                    KeepTogether([*question_flowables, Spacer(1, answer_height)]),
+                ]
             )
-        )
-        story.append(Spacer(1, 10 * mm if item.question_type == "解答题" else 5 * mm))
-
-    if teacher_version:
-        story.extend([PageBreak(), Paragraph("参考答案与解析", styles["title"]), Spacer(1, 6 * mm)])
-        for index, item in enumerate(paper.items, start=1):
-            story.append(Paragraph(f"第 {index} 题", styles["answer_title"]))
-            story.append(
-                Paragraph(f"答案：{escape(item.final_answer or '暂无独立答案')}", styles["answer"])
+        else:
+            story.extend(
+                [
+                    *question_flowables,
+                    Spacer(1, 6 * mm if item.question_type == "选择题" else 4 * mm),
+                ]
             )
-            for step_index, step in enumerate(item.solution_steps, start=1):
-                story.append(Paragraph(f"{step_index}. {escape(step)}", styles["answer"]))
-            if item.knowledge:
-                story.append(
-                    Paragraph(f"知识点：{escape('、'.join(item.knowledge))}", styles["meta"])
-                )
-            story.append(Spacer(1, 5 * mm))
 
     doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
     return buffer.getvalue()
@@ -101,39 +110,46 @@ def _styles() -> dict[str, ParagraphStyle]:
         "title": ParagraphStyle(
             "title",
             fontName=FONT,
-            fontSize=20,
-            leading=28,
+            fontSize=18,
+            leading=25,
             alignment=TA_CENTER,
             textColor=colors.HexColor("#0F172A"),
         ),
         "section": ParagraphStyle(
             "section",
             fontName=FONT,
-            fontSize=13,
-            leading=20,
-            spaceBefore=5,
-            textColor=colors.HexColor("#1D4ED8"),
-            borderColor=colors.HexColor("#93C5FD"),
-            borderWidth=0,
-            borderPadding=(3, 0, 3, 7),
+            fontSize=12,
+            leading=19,
+            spaceBefore=3,
+            textColor=colors.black,
+            borderPadding=(0, 0, 0, 0),
             leftIndent=0,
         ),
         "question": ParagraphStyle(
             "question",
             fontName=FONT,
-            fontSize=11,
-            leading=20,
+            fontSize=10.8,
+            leading=19,
             alignment=TA_LEFT,
             textColor=colors.HexColor("#111827"),
             wordWrap="CJK",
         ),
-        "answer_title": ParagraphStyle(
-            "answer_title",
+        "option": ParagraphStyle(
+            "option",
             fontName=FONT,
-            fontSize=12,
-            leading=20,
+            fontSize=10.5,
+            leading=17,
+            textColor=colors.HexColor("#111827"),
+            wordWrap="CJK",
+        ),
+        "answer_label": ParagraphStyle(
+            "answer_label",
+            fontName=FONT,
+            fontSize=10.5,
+            leading=18,
             textColor=colors.HexColor("#1D4ED8"),
             spaceAfter=3,
+            leftIndent=8 * mm,
         ),
         "answer": ParagraphStyle(
             "answer",
@@ -142,6 +158,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=18,
             textColor=colors.HexColor("#1F2937"),
             wordWrap="CJK",
+            leftIndent=8 * mm,
         ),
         "meta": ParagraphStyle(
             "meta",
@@ -150,8 +167,97 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=16,
             textColor=colors.HexColor("#64748B"),
             wordWrap="CJK",
+            leftIndent=8 * mm,
         ),
     }
+
+
+def _section_title(paper: PaperPreviewRead, question_type: str) -> str:
+    items = [item for item in paper.items if item.question_type == question_type]
+    score = sum(item.score for item in items)
+    number = {"选择题": "一", "多选题": "二", "填空题": "三", "解答题": "四"}.get(
+        question_type, "一"
+    )
+    descriptions = {
+        "选择题": "每小题给出的选项中，只有一个选项正确。",
+        "多选题": "每小题给出的选项中，有多项符合题目要求。",
+        "填空题": "请将答案填写在题中横线上。",
+        "解答题": "解答应写出文字说明、证明过程或演算步骤。",
+    }
+    average = score // len(items) if items and score % len(items) == 0 else None
+    per_item = f"，每小题 {average} 分" if average is not None else ""
+    return escape(
+        f"{number}、{question_type}（本大题共 {len(items)} 小题{per_item}，共 {score} 分。"
+        f"{descriptions.get(question_type, '')}）"
+    )
+
+
+def _answer_space_mm(score: int) -> int:
+    return max(32, min(72, 20 + score * 3))
+
+
+_OPTION_PATTERN = re.compile(r"^[A-D][.、．]\s*")
+
+
+def _question_flowables(item, index: int, styles: dict[str, ParagraphStyle]) -> list:
+    lines = [line.strip() for line in item.question_text.splitlines() if line.strip()]
+    options = [line for line in lines if _OPTION_PATTERN.match(line)]
+    stem_lines = [line for line in lines if not _OPTION_PATTERN.match(line)]
+    prefix = (
+        f"{index}.（本小题满分 {item.score} 分）"
+        if item.question_type == "解答题"
+        else f"{index}. "
+    )
+    result = [
+        Paragraph(
+            prefix + escape(" ".join(stem_lines)),
+            styles["question"],
+        )
+    ]
+    if options:
+        columns = 4 if len(options) == 4 else min(2, len(options))
+        cells = [Paragraph(escape(option), styles["option"]) for option in options]
+        while len(cells) % columns:
+            cells.append("")
+        rows = [cells[start : start + columns] for start in range(0, len(cells), columns)]
+        result.extend(
+            [
+                Spacer(1, 2 * mm),
+                Table(
+                    rows,
+                    colWidths=[(174 / columns) * mm] * columns,
+                    style=TableStyle(
+                        [
+                            ("FONTNAME", (0, 0), (-1, -1), FONT),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                            ("TOPPADDING", (0, 0), (-1, -1), 2),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                        ]
+                    ),
+                ),
+            ]
+        )
+    return result
+
+
+def _teacher_answer_flowables(item, styles: dict[str, ParagraphStyle]) -> list:
+    result = [
+        Spacer(1, 2 * mm),
+        Paragraph(
+            f"答案：{escape(item.final_answer or '暂无独立答案')}", styles["answer_label"]
+        ),
+    ]
+    if item.solution_steps:
+        result.append(Paragraph("解析：", styles["answer_label"]))
+        result.extend(
+            Paragraph(f"{index}. {escape(step)}", styles["answer"])
+            for index, step in enumerate(item.solution_steps, start=1)
+        )
+    if item.knowledge:
+        result.append(Paragraph(f"知识点：{escape('、'.join(item.knowledge))}", styles["meta"]))
+    return result
 
 
 def _page_number(canvas, doc) -> None:

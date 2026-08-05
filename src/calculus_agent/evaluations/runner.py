@@ -12,6 +12,8 @@ from calculus_agent.schemas import AgentRunRequest
 
 
 def run_evaluation(cases_path: Path, *, mode: str, settings: Settings) -> dict:
+    if not settings.siliconflow_api_key:
+        raise RuntimeError("评测需要配置 SILICONFLOW_API_KEY")
     cases = [
         json.loads(line)
         for line in cases_path.read_text(encoding="utf-8").splitlines()
@@ -29,9 +31,10 @@ def run_evaluation(cases_path: Path, *, mode: str, settings: Settings) -> dict:
                     max_steps=case.get("max_steps", 12),
                     mode=mode,
                 ),
-                base_url=settings.ollama_base_url,
-                model=settings.solver_model,
-                timeout=settings.solver_timeout_seconds,
+                api_key=settings.siliconflow_api_key,
+                base_url=settings.siliconflow_base_url,
+                model=settings.siliconflow_agent_model,
+                timeout=settings.siliconflow_timeout_seconds,
             )
             traces = [
                 TraceEntry(

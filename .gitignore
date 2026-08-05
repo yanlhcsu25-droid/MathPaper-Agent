@@ -4,11 +4,14 @@
 __pycache__/
 *.py[cod]
 *.db
+*.db.backup-*
 .env
 output/
 tmp/
+data/external/
 web/node_modules/
 web/dist/
 *.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+/测试卷.pdf

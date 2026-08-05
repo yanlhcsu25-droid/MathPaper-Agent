@@ -29,7 +29,7 @@ class ToolAgent:
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
         ]
-        schemas = [tool.ollama_schema() for tool in self.tools.values()]
+        schemas = [tool.chat_schema() for tool in self.tools.values()]
         while True:
             response = self.backend.complete(messages, schemas)
             message = response.get("message") or {}
@@ -84,7 +84,8 @@ class ToolAgent:
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_name": name,
+                        "tool_call_id": str(call.get("id") or name),
+                        "name": name,
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )

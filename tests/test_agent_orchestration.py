@@ -2,6 +2,7 @@ from calculus_agent.models import KnowledgeNode, Question, QuestionDraft, Questi
 from calculus_agent.orchestration.agents import PaperAgentOrchestrator
 from calculus_agent.orchestration.loop import ToolAgent
 from calculus_agent.orchestration.types import AgentRunContext, AgentTool, RunBudget
+from calculus_agent.schemas import PaperBlueprint
 
 
 class FakeBackend:
@@ -104,45 +105,36 @@ def test_multi_agent_delegates_composes_and_reviews(session):
         "knowledge_quotas": [{"name": "一次函数", "count": 1}],
         "seed": 42,
     }
-    backend = FakeBackend(
-        [
-            _call(
-                "delegate_agent",
-                {"agent_type": "knowledge_steward", "task": "检查八年级一次函数题库供给"},
-            ),
-            _call(
-                "inspect_question_supply",
-                {"grade": "八年级", "knowledge_names": ["一次函数"]},
-            ),
-            _text("题库有1道符合条件的解答题。"),
-            _call("compose_paper", {"blueprint": blueprint}),
-            _call(
-                "delegate_agent",
-                {"agent_type": "paper_reviewer", "task": "审核当前试卷"},
-            ),
-            _call("validate_current_paper", {}),
-            _text("审核通过。"),
-            _text("组卷完成并通过审核。"),
-        ]
-    )
+    backend = FakeBackend([])
     context = AgentRunContext(session=session, budget=RunBudget(max_steps=8))
     result = PaperAgentOrchestrator(backend).run(
         "生成一套八年级一次函数测试卷",
         context,
         mode="multi_agent",
+        blueprint=PaperBlueprint.model_validate(blueprint),
     )
-    assert result.text == "组卷完成并通过审核。"
+    assert "组卷阶段：已生成 1 道题" in result.text
+    assert "审核阶段：审核通过，无硬约束或答案解析问题" in result.text
     assert context.current_paper is not None
     assert context.current_paper.feasible is True
     assert [trace.actor for trace in context.traces] == [
-        "PaperOrchestratorAgent",
         "KnowledgeStewardAgent",
-        "PaperOrchestratorAgent",
-        "PaperOrchestratorAgent",
+        "PaperComposerAgent",
         "PaperReviewerAgent",
     ]
     assert context.traces[-1].tool_name == "validate_current_paper"
     assert context.traces[-1].result["status"] == "passed"
+
+
+def test_multi_agent_requires_parsed_blueprint(session):
+    backend = FakeBackend([])
+    context = AgentRunContext(session=session, budget=RunBudget(max_steps=8))
+    try:
+        PaperAgentOrchestrator(backend).run("生成测试卷", context, mode="multi_agent")
+    except ValueError as error:
+        assert str(error) == "多 Agent 模式缺少已解析的组卷蓝图"
+    else:
+        raise AssertionError("missing blueprint must fail")
 
 
 def test_repeated_identical_tool_call_is_blocked(session):

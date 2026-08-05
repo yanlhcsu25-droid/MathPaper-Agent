@@ -123,6 +123,101 @@ class QuestionKnowledgeLink(Base):
     evidence_json: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class PaperBlueprintRecord(Base):
+    __tablename__ = "paper_blueprint"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(String(255), index=True)
+    blueprint_json: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class Paper(Base):
+    __tablename__ = "paper"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    blueprint_id: Mapped[str] = mapped_column(ForeignKey("paper_blueprint.id"), index=True)
+    root_paper_id: Mapped[str | None] = mapped_column(
+        ForeignKey("paper.id"), nullable=True, index=True
+    )
+    parent_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("paper.id"), nullable=True, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    total_score: Mapped[int] = mapped_column(Integer)
+    validation_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class PaperItem(Base):
+    __tablename__ = "paper_item"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "question_id"),
+        UniqueConstraint("paper_id", "position"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("paper.id"), index=True)
+    question_id: Mapped[str] = mapped_column(ForeignKey("question.id"), index=True)
+    section: Mapped[str] = mapped_column(String(40))
+    position: Mapped[int] = mapped_column(Integer)
+    score: Mapped[int] = mapped_column(Integer)
+    locked: Mapped[bool] = mapped_column(default=False)
+
+
+class ValidationReport(Base):
+    __tablename__ = "validation_report"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    paper_id: Mapped[str] = mapped_column(ForeignKey("paper.id"), index=True)
+    passed: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class ConstraintViolation(Base):
+    __tablename__ = "constraint_violation"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    report_id: Mapped[str] = mapped_column(ForeignKey("validation_report.id"), index=True)
+    code: Mapped[str] = mapped_column(String(80), index=True)
+    field: Mapped[str] = mapped_column(String(255))
+    required_json: Mapped[object] = mapped_column(JSON)
+    actual_json: Mapped[object] = mapped_column(JSON)
+    question_ids_json: Mapped[list] = mapped_column(JSON, default=list)
+    repairable: Mapped[bool] = mapped_column(default=True)
+    message: Mapped[str] = mapped_column(Text)
+
+
+class MistakePrepTask(Base):
+    __tablename__ = "mistake_prep_task"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grade: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    question_text: Mapped[str] = mapped_column(Text)
+    final_answer: Mapped[str] = mapped_column(Text)
+    solution_text: Mapped[str] = mapped_column(Text)
+    error_reason: Mapped[str] = mapped_column(Text)
+    question_type: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    target_difficulty: Mapped[float] = mapped_column(Float, default=0.5)
+    knowledge_names_json: Mapped[list] = mapped_column(JSON, default=list)
+    matched_question_ids_json: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class AgentRun(Base):
     __tablename__ = "agent_run"
 
