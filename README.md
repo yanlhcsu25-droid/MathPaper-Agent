@@ -1,36 +1,27 @@
 # MathPaper Agent
 
-面向中文初中数学教师的智能备课工作台。教师可以围绕学生错题建立备课任务、匹配巩固题，也可以描述试卷要求，由系统生成可检查、可复现的学生卷和教师解析卷。
+面向中文初中数学教师的可验证智能组卷系统。教师用自然语言描述要求，检查并确认结构化蓝图后，系统通过严格约束求解生成、持久化并审核试卷；预览、编辑和导出始终读取同一条 `Paper/PaperItem` 版本链。
 
 > 当前项目由旧高数原型独立重构而来，Python 包名暂时保留为 `calculus_agent`，不影响运行；后续稳定数据库迁移后再统一改名。
 
 ## 核心闭环
 
 ```text
-CMM-Math 中文题目、答案与解析
-→ 可信数据批量入库与知识点归一化
-→ 教师自然语言要求
-→ Qwen3 JSON Schema 解析 + 明示规则兜底
-→ 可编辑 Exam Blueprint
-→ 确定性约束选题
-→ 约束满足报告
-→ 学生卷 PDF + 教师解析卷 PDF
+教师自然语言要求
+→ 唯一需求解析器创建 Blueprint 草稿
+→ 教师编辑 Sections、知识点、难度和随机种子
+→ 确认 Blueprint
+→ OR-Tools CP-SAT 严格约束组卷
+→ 保存 Paper 与 PaperItem
+→ 自动生成结构化 ValidationReport
+→ 按 paper_id 预览、版本化编辑和导出 PDF/LaTeX
 ```
 
-LLM 只负责理解语言和整理解析，不直接决定最终选题。相同题库、蓝图和随机种子会产生可复现结果；题库不足时返回具体未满足约束，不会偷偷降低要求。
+LLM 只负责把自然语言转换为蓝图，不直接决定最终选题。所有题型、题量、分值、知识点、难度和排除约束均由代码执行。相同题库快照、蓝图和随机种子会产生相同题目与顺序；题库不足时返回结构化缺口，不会自动放宽要求。
 
-## Agent 与确定性工具的分工
+## 唯一正式组卷流程
 
-Agent 负责理解自然语言教学要求；题库统计、组卷和审核由程序强制按阶段执行，避免小模型跳过工具或编造题库内容：
-
-```text
-RequirementAgent（结构化蓝图）
-→ KnowledgeStewardAgent（题库供给证据）
-→ PaperComposerAgent（确定性组卷）
-→ PaperReviewerAgent（约束、答案和解析审核）
-```
-
-阶段顺序由代码保证，调用主体、参数、结果、状态和耗时会持久化为轨迹。基础组卷本身不依赖模型。
+教师主页面只保留“解析要求 → 编辑蓝图 → 确认并生成 → 编辑已保存试卷 → 导出”这一条业务主线。历史多 Agent 实验代码仍保留用于研究，但不进入正式教师组卷入口，也不能绕过已确认 Blueprint 创建正式 Paper。
 
 ## 错题备课任务
 
@@ -61,18 +52,18 @@ CALCULUS_AGENT_BAILIAN_VISION_MODEL=qwen3-vl-plus
 - CMM-Math JSONL 适配，可筛选初中年级、纯文本题以及带完整解析的记录；
 - MM-Math 适配与字段审计保留为英文多模态数据实验入口；
 - 可信公开数据集批量发布；以后 OCR/教师自有题目仍可走草稿审核流程；
-- 阿里云百炼 `qwen-plus` 多 Agent 组卷需求解析；
+- 唯一自然语言解析入口，生成可编辑、可确认的 Blueprint；
 - 年级和难度显式表达的规则兜底；
-- 年级、难度、题型数量、知识点配额、总题量和总分约束；
-- 约束报告和无法组卷原因；
+- Sections 级题型数量、每题分值和部分总分建模；
+- OR-Tools CP-SAT 严格约束求解，未知难度题默认排除；
+- 结构化 ValidationReport 和不可行供给缺口；
 - React + TypeScript + Ant Design 教师端；
 - 错题、标准答案、标准解析和错误原因的结构化备课任务；
 - 根据知识点、题型与难度匹配巩固题，并保留匹配依据；
 - 阿里云百炼标准印刷题图片识别，并将结构化结果回填到教师审核表单；
-- 支持锁定满意题目、单题换题和排除已换题目，重组后重新验证全部约束；
-- 支持保存试卷草稿、浏览历史版本、载入旧版本并另存为新版本；
-- 支持按题干搜索已审核题库、手动加题、调整题序和覆盖单题分值；
-- 自动对比相邻试卷版本，显示增删题、题序、分值和蓝图字段变化；
+- `Paper/PaperItem` 持久化以及 `root_paper_id/parent_version_id` 版本链；
+- 换题、锁题、调序和改分均创建新 Paper 版本并自动重新审核；
+- 预览、审核和 PDF/LaTeX 导出只读取当前 `paper_id`，导出过程不重新选题；
 - 学生卷采用标准 A4 校内试卷版式，选择项横向排列，解答题独立成节并按分值预留答题区域；
 - 嵌入中文字体的学生卷和教师解析卷 PDF；
 - 可二次编辑的学生卷和教师解析卷 LaTeX 源文件；
@@ -121,10 +112,10 @@ CALCULUS_AGENT_BAILIAN_AGENT_MODEL=qwen-plus
 
 后端 API 文档位于 `http://127.0.0.1:8000/docs`。
 
-Linux 环境需要提供中文字体路径：
+Linux 环境需要安装兼容的中文 TrueType 字体，或显式提供字体路径：
 
 ```bash
-export MATH_PAPER_FONT_PATH=/path/to/NotoSansCJK-Regular.ttc
+export MATH_PAPER_FONT_PATH=/path/to/compatible-cjk-font.ttf
 ```
 
 ## 导入中文 CMM-Math
@@ -151,12 +142,17 @@ export MATH_PAPER_FONT_PATH=/path/to/NotoSansCJK-Regular.ttc
 
 ## 关键接口
 
-- `POST /api/v1/papers/parse-requirement`：自然语言转组卷蓝图；
-- `POST /api/v1/papers/preview`：确定性选题与约束报告；
-- `POST /api/v1/papers/export/student`：学生试卷 PDF；
-- `POST /api/v1/papers/export/teacher`：教师解析卷 PDF；
-- `POST /api/v1/papers/export-latex/student`：学生试卷 `.tex`；
-- `POST /api/v1/papers/export-latex/teacher`：教师解析卷 `.tex`；
+- `POST /api/v1/blueprints/parse`：自然语言创建 Blueprint 草稿；
+- `GET/PATCH /api/v1/blueprints/{blueprint_id}`：读取或编辑草稿；
+- `POST /api/v1/blueprints/{blueprint_id}/confirm`：确认蓝图；
+- `POST /api/v1/papers`：根据已确认蓝图生成、保存并审核试卷；
+- `GET /api/v1/papers/{paper_id}`：读取同一份持久化试卷和审核报告；
+- `POST /api/v1/papers/{paper_id}/items/{item_id}/replace`：换题并创建新版本；
+- `PATCH /api/v1/papers/{paper_id}/items/{item_id}`：改分并创建新版本；
+- `POST /api/v1/papers/{paper_id}/items/reorder`：调序并创建新版本；
+- `POST /api/v1/papers/{paper_id}/items/{item_id}/lock`：锁题并创建新版本；
+- `POST /api/v1/papers/{paper_id}/validate`：重新审核已保存试卷；
+- `GET /api/v1/papers/{paper_id}/exports/{student|teacher}.{pdf|tex}`：导出当前版本；
 - `POST /api/v1/datasets/cmm-math/import`：中文 K12 题库筛选导入；
 - `POST /api/v1/datasets/mm-math/import`：英文多模态 MM-Math 实验导入；
 - `POST /api/v1/agents/runs`：执行单 Agent或多 Agent组卷任务；
@@ -184,8 +180,7 @@ uv run ruff check src tests
 cd web && pnpm build
 ```
 
-当前自动化测试：23 项全部通过；前端 TypeScript 检查和生产构建通过。PDF
-已使用 Poppler 渲染为图片并检查中文字体、分页、页码和解析布局。
+当前自动化测试：48 项全部通过；包含 Paper 版本化编辑、预览与导出同源、相同 seed 可复现、未知难度排除，以及 100/1,000/3,000 题题库性能验收。前端 TypeScript 检查和生产构建通过。GitHub Actions 会在 push 和 Pull Request 上自动执行 Ruff、Pytest 和前端生产构建。
 
 ## 下一阶段
 

@@ -10,7 +10,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.platypus import (
     CondPageBreak,
     KeepTogether,
@@ -30,10 +30,23 @@ _FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 ]
-_font_path = next((path for path in _FONT_CANDIDATES if path and Path(path).is_file()), None)
-if _font_path is None:
-    raise RuntimeError("未找到中文字体，请设置 MATH_PAPER_FONT_PATH")
-pdfmetrics.registerFont(TTFont(FONT, _font_path))
+
+
+def _register_cjk_font() -> str:
+    errors = []
+    for path in _FONT_CANDIDATES:
+        if not path or not Path(path).is_file():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(FONT, path))
+            return path
+        except (OSError, TTFError) as error:
+            errors.append(f"{path}: {error}")
+    detail = f"；已尝试：{' | '.join(errors)}" if errors else ""
+    raise RuntimeError(f"未找到ReportLab兼容的中文TrueType字体，请设置MATH_PAPER_FONT_PATH{detail}")
+
+
+_font_path = _register_cjk_font()
 
 
 def render_paper_pdf(paper: PaperPreviewRead, *, teacher_version: bool) -> bytes:
